@@ -1,0 +1,27 @@
+[project]
+name = "tax-agent"
+version = "0.1.0"
+description = "税法检索与解读 Agent"
+requires-python = ">=3.12"
+
+# 只列直接依赖。langchain-core / langgraph-checkpoint 等由它们传递带入，不重复钉版本。
+dependencies = [
+    "deepagents>=0.7.15",   # create_deep_agent / skills / FilesystemBackend / permissions
+    "langchain-openai>=1.6.2",  # eurekax.ChatOpenAICompatible 继承 ChatOpenAI
+    "langgraph>=1.2.11",    # InMemorySaver（P2 换 OpenGaussAsyncSaver）
+    "fastapi>=0.141.1",     # POST /chat + SSE
+    "uvicorn>=0.53.0",      # ASGI server
+    "sqlalchemy>=2.0.54",   # eurekax.isolation.__init__ 无条件导入 OpenGaussSessionBinding，间接依赖
+    "loguru>=0.7.3",        # 检索/过滤/引用校验三类失败要能在日志里一眼区分，stdlib logging 配置太啰嗦
+    "httpx>=0.28",          # TTC HTTP 调用
+]
+
+# eurekax / pyxis 不在这里：本地从 assets/site-packages 直接引用源码，
+# 内网装 hw-finance-agentframework 后加进来，并删掉 agent.py 里的 sys.path 两行。
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

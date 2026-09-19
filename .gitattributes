@@ -1,0 +1,2 @@
+# 仓库要在本机 Windows 与内网之间来回搬，统一用 LF 存储，避免 checkout 产生满屏假 diff
+* text=auto eol=lf
