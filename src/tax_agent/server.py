@@ -154,6 +154,13 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             ):
                 if isinstance(msg, ToolMessage):
                     tool_messages.append(msg)
+                    # stream_mode="messages" 会吐出 ReAct 循环里**每一轮**的模型输出，包括
+                    # "两个检索均无结果，换个关键词再试" 这类中间独白。它们不是答案：混进
+                    # answer 会污染 audit_citations——中间轮提到过的条款号能把一个终答里
+                    # 其实没引用的回答"洗"成合格。清掉之后 answer 只剩最后一次工具返回之后
+                    # 的文本，也就是终答。独白照旧逐字流给用户，前端用这个 tool 帧分段显示。
+                    answer_parts.clear()
+                    yield _sse({"type": "tool", "name": msg.name})
                 elif msg.content:
                     answer_parts.append(msg.content)
                     yield _sse({"type": "token", "text": msg.content})
@@ -205,11 +212,18 @@ def _demo() -> None:
             self.captured_configs: list[dict] = []
             self.captured_identities: list = []
 
+        # 按真实 ReAct 序列出牌：中间独白 -> 工具返回 -> 终答。独白里故意带一条合法引用，
+        # 终答故意不带引用且超过 80 字——这正是最危险的那种形状：独白里的条款号一旦被拼进
+        # answer，就会把一个毫无依据的终答"洗"成引用校验通过
+        NARRATION = "先检索一下，[AD-VAT-CN-00001] 看起来相关，再确认一下。"
+        FINAL = "很抱歉，" + "法规库中没有查到可以支撑这个问题的现行条款，因此无法给出带条款依据的解答。" * 4
+
         async def astream(self, _input, config=None, stream_mode=None):
             self.captured_configs.append(config)
             self.captured_identities.append(current())
-            yield AIMessageChunk(content="你好"), {}
+            yield AIMessageChunk(content=self.NARRATION), {}
             yield ToolMessage(content="AD-VAT-CN-00001", tool_call_id="1", name="search_regulation"), {}
+            yield AIMessageChunk(content=self.FINAL), {}
 
     def make_token(payload: dict) -> str:
         segment = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
@@ -233,6 +247,14 @@ def _demo() -> None:
     assert done["auth_mode"] == "user_token", done
     zhangsan_session_id = done["session_id"]
     assert stub.captured_identities[-1].isolate_key == "zhangsan"
+
+    # 2b. 中间独白不算答案：照旧流给用户，但不进引用校验
+    events = _parse_sse(r.text)
+    assert {"type": "tool", "name": "search_regulation"} in events, events
+    streamed = "".join(e["text"] for e in events if e["type"] == "token")
+    assert StubAgent.NARRATION in streamed, streamed  # 独白该看见就看见，不是吞掉
+    # 独白里那条 [AD-VAT-CN-00001] 不能替终答背书：answer 只该有终答，于是必须报"没有引用"
+    assert done["citation_problems"] == ["回答中没有任何条款引用"], done
 
     # token 不进图：检查上面 zhangsan 那次调用留下的 config
     zhangsan_config = stub.captured_configs[-1]

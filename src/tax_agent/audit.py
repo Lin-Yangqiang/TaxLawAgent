@@ -16,10 +16,13 @@ from loguru import logger
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# TTC 的 tlpNumber 形如 AD-ITX-CN-00275 / AD-TA-General-00652：首段全大写，
-# 其后至少一段，段内可能混大小写（General）；不再拼版本号，clause_id 就是 tlpNumber 本身。
+# TTC 的 tlpNumber 形如 AD-ITX-CN-00275 / AD-TA-General-00652 / AD-PE-CN/CO-00003：
+# 首段全大写，其后至少一段，段内可能混大小写（General），也可能带斜杠（跨税地条款的
+# CN/CO）——这两种都是内网真实语料里抄回来的形态，不是假想。斜杠那种旧正则识别不了，
+# 于是既不算引用也不算"检索过"，编造一个带斜杠的条款号可以静默绕过整道门禁。
+# 不再拼版本号，clause_id 就是 tlpNumber 本身。
 # 最后一段收紧到 ≥3 位数字，是为了不让 ToolMessage JSON 里的 "CN-SG"、日期之类误命中。
-CLAUSE_ID = r"[A-Z]{2,}(?:-[A-Za-z0-9]+)+-\d{3,}"
+CLAUSE_ID = r"[A-Z]{2,}(?:-[A-Za-z0-9/]+)+-\d{3,}"
 CITATION = re.compile(rf"\[({CLAUSE_ID})\]")
 
 
@@ -75,6 +78,12 @@ def _demo() -> None:
     # 段内混大小写（TTC 的 General 税地）必须能识别，这是旧正则漏掉的形态
     mixed = [ToolMessage(content="AD-TA-General-00401", tool_call_id="1")]
     assert audit_citations("协定优先[AD-TA-General-00401]", mixed) == []
+
+    # 段内带斜杠（跨税地条款）同样是真实形态。第二条才是关键：旧正则下它连引用都算不上，
+    # 编造的斜杠条款号会被静默放过，门禁形同虚设
+    slashed = [ToolMessage(content="AD-PE-CN/CO-00601", tool_call_id="1")]
+    assert audit_citations("构成固定营业场所[AD-PE-CN/CO-00601]", slashed) == []
+    assert "未经检索" in audit_citations("构成固定营业场所[AD-PE-CN/CO-00601]", retrieved)[0]
 
     # 不该命中的东西：段数不够/末段数字不够的代码、日期、纯大写单词
     for noise in ("[CN-SG]", "[2026-01-01]", "[PUBLISHED]"):

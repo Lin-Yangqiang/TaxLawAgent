@@ -16,10 +16,13 @@
 ## 条款号格式
 
 `clause_id` 就是 TTC 的 `tlpNumber` 本身，不拼版本号，形如
-`AD-ITX-CN-00275`、`AD-TA-General-00652`——**段内可能混大小写**（`General`）。
+`AD-ITX-CN-00275`、`AD-TA-General-00652`、`AD-PE-CN/CO-00003`——**段内可能混大小写**
+（`General`），**也可能带斜杠**（`CN/CO`，跨税地条款）。
 `revision`（整数）是条款的独立属性，随证据一起返回，但不进 clause_id：
 TTC 自己就是身份（tlpNumber）与属性（version）分开的。`data/clauses.json`
-的样本必须保持同构，否则本地测不出真实形态的解析 bug。
+的样本必须覆盖上面每一种形态，否则本地测不出真实形态的解析 bug——斜杠那种就是这样漏过去的：
+样本全是 `AD-VAT-CN-00001` 一种形状，引用正则识别不了斜杠，编造的斜杠条款号能静默绕过门禁。
+样本编号一律虚构，不借用真实条款号（把编造正文挂到真实号上，正是这个 Agent 要防的失败模式）。
 引用校验正则在 `src/tax_agent/audit.py`。
 
 ## 日志

@@ -1,5 +1,5 @@
 {
-  "_note": "本地样本，非真实法规，仅用于 demo 验证检索与引用链路。真实数据由 TTC 提供，字段命名对齐 source_id / revision / effective_from。",
+  "_note": "本地样本，非真实法规，仅用于 demo 验证检索与引用链路。真实数据由 TTC 提供，字段命名对齐 source_id / revision / effective_from。source_id 必须覆盖真实语料里出现过的全部形态（含 General 这样的混大小写段、CN/CO 这样的斜杠段），否则本地测不出真实形态的解析 bug——引用正则漏掉斜杠形态就是这样漏过去的。编号一律虚构，不借用真实条款号。",
   "clauses": [
     {
       "source_id": "AD-VAT-CN-00001",
@@ -205,6 +205,18 @@
       "effective_from": "2019-04-01",
       "effective_to": "2025-12-31",
       "content": "生产性服务业纳税人按照当期可抵扣进项税额加计 5%、生活性服务业加计 10% 抵减应纳税额。该政策已于 2025 年 12 月 31 日到期废止，2026 年 1 月 1 日起不再执行，此前结余的加计抵减额不得继续结转抵减。"
+    },
+    {
+      "source_id": "AD-PE-CN/CO-00601",
+      "revision": 1,
+      "clause_status": "PUBLISHED",
+      "tlp_number": "中哥税收协定 第五条第三款",
+      "title": "建筑工地构成固定营业场所的持续期间门槛",
+      "tax_category": "税收协定",
+      "jurisdiction": "CN/CO",
+      "effective_from": "2024-07-01",
+      "effective_to": null,
+      "content": "缔约国一方企业在缔约国另一方的建筑工地、建筑、装配或安装工程，或者与其有关的监督管理活动，仅当该工地、工程或活动持续超过 183 天时，才构成在该另一方的固定营业场所。计算持续期间时，同一工程项目下相互关联的多个合同应当合并计算，中途停工的日期不予扣除。"
     }
   ]
 }
