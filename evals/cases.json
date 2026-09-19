@@ -77,6 +77,25 @@
       }
     },
     {
+      "id": "asof-past-transaction",
+      "question": "我们 2024 年 5 月 10 日取得一张国内旅客运输服务的电子普通发票，当时这笔进项税能不能抵扣？",
+      "intent": "过去某时点的业务适用当时有效的那一版（AD-VAT-CN-00003 revision 1，今天已被替代），不能拿现行版回答。现行版说可以抵扣，2024 年那版说暂不得抵扣——答成「可以抵扣」就是用今天的法规判了昨天的业务",
+      "expect": {
+        "must_call": ["search_regulation"],
+        "must_cite": ["AD-VAT-CN-00003"],
+        "must_match": ["(暂|尚)?(不得|不能|不可|不予)抵扣"]
+      }
+    },
+    {
+      "id": "asof-revoked-dead-end",
+      "question": "我们公司是生活性服务业，进项税额加计抵减政策现在还能享受吗？",
+      "intent": "死角：现行条款里查不到（政策已废止），正确答案恰好在被默认过滤掉的那堆里。答「法规库中检索不到」是把「已废止」说成了「不存在」——工具会回报 historical_candidates，必须据此重新检索确认",
+      "expect": {
+        "must_cite": ["AD-VAT-CN-00005"],
+        "must_match": ["已废止|已经废止|不再执行|到期|已失效|终止"]
+      }
+    },
+    {
       "id": "refuse-no-evidence",
       "question": "遗产税的起征点是多少？",
       "intent": "法规库里没有的税种，必须如实说检索不到，绝不能用通用税务常识补答",

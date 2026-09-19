@@ -33,6 +33,7 @@ from tax_agent.sources import (  # noqa: E402
     SearchResult,
     check_source_contract,
     content_hash,
+    covers,
     score,
     snippet,
 )
@@ -147,7 +148,12 @@ class TtcSource:
         self._post = post or partial(_default_post, timeout=timeout)
 
     def search(
-        self, query: str, tax_category: str | None, include_historical: bool, limit: int
+        self,
+        query: str,
+        tax_category: str | None,
+        include_historical: bool,
+        limit: int,
+        as_of: str | None = None,
     ) -> SearchResult:
         # TTC 确认 taxClauseSearchESParamProcess 显式设 sortField=TLP_NUMBER、sortOrder=ASC，
         # 默认按条文编号升序返回，不是相关性序；es_score 也没有映射进 TaxClauseVO。
@@ -158,10 +164,16 @@ class TtcSource:
         payload = self._post(url, {"keyword": query}, self._auth.headers())
         vo = _unwrap(payload, expect_key="pagedResult")
 
-        allowed = {"PUBLISHED", "SUPERSEDED", "REVOKED"} if include_historical else {"PUBLISHED"}
+        # as_of 下按生效区间说话，当前状态不参与——今天已 SUPERSEDED 的那版正是当年的正确依据
+        allowed = (
+            {"PUBLISHED", "SUPERSEDED", "REVOKED"}
+            if include_historical or as_of is not None
+            else {"PUBLISHED"}
+        )
         total_candidates = vo["pagedResult"]["totalCount"]
         scored: list[tuple[float, dict[str, Any]]] = []
         filtered_out = 0
+        undated = 0
         for raw in vo["pagedResult"]["data"]:
             evidence = _project(raw)
             # DRAFT 永远丢弃：草稿不是法规，历史开关管的是已发布过的旧版本
@@ -171,6 +183,16 @@ class TtcSource:
             if tax_category is not None and evidence["tax_category"] != tax_category:
                 filtered_out += 1
                 continue
+            if as_of is not None:
+                covered = covers(evidence, as_of)
+                if covered is None:
+                    # TTC 里日期可空。判不了单独计数往上报，不要混进 filtered_out——
+                    # "我们不知道"和"当时不适用"是两个结论，只有前者需要告诉用户
+                    undated += 1
+                    continue
+                if not covered:
+                    filtered_out += 1
+                    continue
             s = score(query, raw["articleOrRegulationTitle"], raw["tlpContent"])
             scored.append((s, {**evidence, "score": s, "snippet": snippet(query, raw["tlpContent"])}))
 
@@ -181,12 +203,21 @@ class TtcSource:
         hits = [h for _, h in scored[:limit]]
 
         logger.info(
-            "TtcSource.search query={!r} 命中={} 总候选={} 过滤掉={}",
-            query, len(hits), total_candidates, filtered_out,
+            "TtcSource.search query={!r} as_of={} 命中={} 总候选={} 过滤掉={} 生效日缺失={}",
+            query, as_of, len(hits), total_candidates, filtered_out, undated,
         )
-        return SearchResult(hits, total_candidates)
+        return SearchResult(hits, total_candidates, undated)
 
-    def fetch(self, clause_id: str) -> dict[str, Any] | None:
+    def fetch(self, clause_id: str, as_of: str | None = None) -> dict[str, Any] | None:
+        if as_of is not None:
+            # queryTlpInfo 靠 releaseFlag=Y + operationType 锁定"最新已发布版"，没有按版本或
+            # 按日期取历史正文的入参。硬着头皮不带 as_of 调，会拿回现行版正文冒充当年的条款——
+            # 检索命中的是 revision 1，正文却是 revision 2，结论正好反过来且看不出错。
+            # 内网 runbook 里要问清 TTC 有没有取历史版本正文的接口，有就在这里接上。
+            raise NotImplementedError(
+                "TTC queryTlpInfo 只返回最新已发布版本，取不到历史版本正文；"
+                "时点检索的片段可作引用，但完整正文需要 TTC 提供按版本取正文的接口"
+            )
         url = f"{self._base_url}/taxClause/queryTlpInfo"
         # releaseFlag="Y" 只在 ES 链路生效；DB 链路（queryTlpInfo）靠
         # operationType="relation_tlp_info" 强制 tlpStatus=RELEASED。两个都传才保证
@@ -272,8 +303,11 @@ class TtcPublicSource:
        **一条已废止的条款在这个源下看起来和现行条款完全一样**。拿它作答会给出过期结论，
        这正是本 Agent 最该防住的失败模式。
 
-    ponytail: 失效状态不可判定、无标题/税种/生效日期，是公有 API 字段集的硬上限。
-    升级路径是换回私有接口（TtcSource + 透传用户 token），不是在这里补猜测逻辑。
+    3. 没有生效日期就没有时点检索，`as_of` 在这个源下只能直接拒绝（抛 NotImplementedError）。
+
+    ponytail: 失效状态不可判定、无标题/税种/生效日期、时点检索不可用，是公有 API
+    字段集的硬上限。升级路径是换回私有接口（TtcSource + 透传用户 token），
+    不是在这里补猜测逻辑。
 
     Args:
         base_url: TTC 服务根地址（不含公有 API 路径段）。
@@ -295,8 +329,21 @@ class TtcPublicSource:
         self._post = post or partial(_default_post, timeout=timeout)
 
     def search(
-        self, query: str, tax_category: str | None, include_historical: bool, limit: int
+        self,
+        query: str,
+        tax_category: str | None,
+        include_historical: bool,
+        limit: int,
+        as_of: str | None = None,
     ) -> SearchResult:
+        if as_of is not None:
+            # 这里不能照 tax_category 那样"警告后忽略"。忽略税种过滤的后果是结果过宽，
+            # 模型还看得见多出来的条款；忽略 as_of 的后果是拿今天的条款冒充当年的条款，
+            # 从返回值里完全看不出来——那正是本 Agent 最该防住的失败模式。
+            raise NotImplementedError(
+                "公有 API 的 ExtTaxClausePageListVo 不返回 effectiveFrom/effectiveTo，"
+                "无法按时点检索；时点问题需要私有接口（TAX_AGENT_SOURCE=ttc_user）"
+            )
         if tax_category is not None:
             # 响应里没有 taxCategoryName，客户端过滤无从下手。照常返回而不是静默丢弃：
             # 假装过滤了会让上层以为结果已经收窄，漏检和编造一样有害。
@@ -339,7 +386,12 @@ class TtcPublicSource:
         )
         return SearchResult(hits, total_candidates)
 
-    def fetch(self, clause_id: str) -> dict[str, Any] | None:
+    def fetch(self, clause_id: str, as_of: str | None = None) -> dict[str, Any] | None:
+        if as_of is not None:
+            raise NotImplementedError(
+                "公有 API 不返回生效日期，无法判定哪一版在该时点有效；"
+                "时点问题需要私有接口（TAX_AGENT_SOURCE=ttc_user）"
+            )
         url = f"{self._base_url}{PUBLIC_PATH}/page/100/1"
         payload = self._post(url, {"tlpNumber": clause_id}, self._auth.headers())
         vo = _public_unwrap(payload)
@@ -424,6 +476,13 @@ def _public_demo() -> None:
     # 税种过滤在此源下被忽略，但不能因此清空结果
     assert source.search("跨境研发服务零税率", "增值税", False, 5).hits, "税种过滤不应清空结果"
 
+    # as_of 则相反：没有日期字段就必须拒绝，不能像 tax_category 那样忽略后照常返回
+    try:
+        source.search("跨境研发服务零税率", None, False, 5, "2024-06-01")
+        raise AssertionError("公有 API 没有生效日期，as_of 必须显式拒绝")
+    except NotImplementedError as exc:
+        assert "ttc_user" in str(exc), exc
+
     # 同一 tlpNumber 多版本时取 version 最大的一条
     full = source.fetch("AD-VAT-CN-00001")
     assert full["revision"] == 3, full
@@ -442,7 +501,7 @@ def _public_demo() -> None:
     except RuntimeError as exc:
         assert "无权限" in str(exc) and "xyz789" in str(exc), exc
 
-    check_source_contract(source, "跨境研发服务零税率", "AD-VAT-CN-00001", "AD-VAT-CN-99999")
+    check_source_contract(source, "跨境研发服务零税率", "AD-VAT-CN-00001", "AD-VAT-CN-99999", "2024-06-01")
     print("ttc_public self-check ok")
 
 
@@ -506,7 +565,17 @@ def _demo() -> None:
         "effectiveFromStr": None,
         "effectiveToStr": None,
     }
-    all_vo = [released, superseded, revoked, soon_expiring, draft]
+    undated_vo = {
+        # effectiveFrom/effectiveTo 整个字段缺失：TTC 里日期是可空的，这是时点检索的边界情形
+        "tlpNumber": "AD-TA-General-00404",
+        "tlpStatus": "RELEASED",
+        "version": 1,
+        "taxCategoryName": "税收协定",
+        "taxJurisdictionName": "中国",
+        "articleOrRegulationTitle": "常设机构认定标准（未维护生效日期）",
+        "tlpContent": "本条文在 TTC 中没有维护生效起始日期。",
+    }
+    all_vo = [released, superseded, revoked, soon_expiring, draft, undated_vo]
 
     calls: list[dict[str, Any]] = []
 
@@ -529,9 +598,14 @@ def _demo() -> None:
 
     source = TtcSource("https://ttc.internal", _FixedAuth(), post=fake_post)
 
-    # 默认只返回 PUBLISHED：released（RELEASED 无归档无失效）与 soon_expiring（即将失效仍现行）
+    # 默认只返回 PUBLISHED：released（RELEASED 无归档无失效）、soon_expiring（即将失效仍现行），
+    # 以及 undated_vo——没传 as_of 时"不知道生效日"不等于"无效"，不该因此丢掉
     default_hits = source.search("跨境研发服务", None, False, 10).hits
-    assert {h["clause_id"] for h in default_hits} == {"AD-VAT-CN-00001", "AD-TA-General-00403"}, default_hits
+    assert {h["clause_id"] for h in default_hits} == {
+        "AD-VAT-CN-00001",
+        "AD-TA-General-00403",
+        "AD-TA-General-00404",
+    }, default_hits
 
     historical_hits = source.search("跨境研发服务", None, True, 10).hits
     statuses = {h["clause_id"]: h["clause_status"] for h in historical_hits}
@@ -542,6 +616,17 @@ def _demo() -> None:
 
     superseded_hit = next(h for h in historical_hits if h["clause_id"] == "AD-TA-General-00401")
     assert superseded_hit["effective_from"] == "2016-05-01", superseded_hit
+
+    # 时点检索：2018-06-01 当天有效的是 revoked 那条（2010-01-01~2020-01-01）。
+    # 它今天已失效，默认检索拿不到，但当年它就是正确依据——这正是 as_of 存在的理由
+    dated = source.search("常设机构认定", None, False, 10, "2018-06-01")
+    dated_ids = {h["clause_id"] for h in dated.hits}
+    assert "AD-TA-General-00402" in dated_ids, dated.hits
+    assert "AD-TA-General-00403" not in dated_ids, dated.hits  # 2020-01-01 才生效
+    assert "AD-VAT-CN-00099" not in dated_ids, dated.hits  # DRAFT 在 as_of 下同样不出现
+    # 生效日缺失的那条既不算命中也不算过滤掉，单独计数报上去
+    assert "AD-TA-General-00404" not in dated_ids, dated.hits
+    assert dated.undated_excluded == 1, dated
 
     assert [h["tax_category"] for h in source.search("x", "增值税", True, 10).hits] == ["增值税"]
     # page_size = min(limit*10, 100)，与是否传 tax_category 无关
@@ -633,7 +718,7 @@ def _demo() -> None:
     ).hits
     assert rerank_hits[0]["clause_id"] == "AD-VAT-CN-20003", rerank_hits
 
-    check_source_contract(source, "跨境研发服务", "AD-VAT-CN-00001", "AD-VAT-CN-99999")
+    check_source_contract(source, "跨境研发服务", "AD-VAT-CN-00001", "AD-VAT-CN-99999", "2018-06-01")
     print("ttc_client self-check ok")
 
 

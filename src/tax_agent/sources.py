@@ -8,12 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import date
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 
 # 检索默认只看现行有效版本。历史版本和废止条款是二期"感知"的输入，
 # 但在解读场景里默认返回会直接导致错误结论，所以要显式开关才可见。
 ACTIVE_STATUSES = frozenset({"PUBLISHED"})
+
+# 草稿在任何开关下都不是证据：include_historical 管的是"已发布过的旧版本"，
+# 不是"还没发布的新版本"。两者都不是现行有效，但只有前者曾经是法律。
+NEVER_EVIDENCE = frozenset({"DRAFT"})
+
+_AS_OF_FORMAT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # ponytail: bigram 打分的经验阈值。先判整体是否命中（低于 MIN_TOP_SCORE 就是库里没有，
 # 必须报 NO_EVIDENCE 而不是让模型拿弱相关条款硬凑），再裁掉尾部噪声。
@@ -24,6 +32,48 @@ MIN_HIT_SCORE = 0.15
 
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def parse_as_of(value: str) -> str:
+    """校验时点日期。
+
+    Args:
+        value: 调用方给的时点，必须是 `YYYY-MM-DD`。
+
+    Returns:
+        原值（已确认是合法日期）。
+
+    Raises:
+        ValueError: 格式不对，或格式对但日期不存在（如 2024-13-45）。
+
+    只认完整日期：把"2024 年 3 月"补成 3 月 1 日等于替用户猜了一个日子，
+    而政策在月中切换、月初月末分属不同申报期的情况是真实存在的，宁可退回去问清。
+    """
+    if not _AS_OF_FORMAT.match(value):
+        raise ValueError(f"as_of 必须是 YYYY-MM-DD 格式的完整日期，收到 {value!r}")
+    date.fromisoformat(value)  # 格式对但不存在的日期（2024-02-31）只有这里拦得住
+    return value
+
+
+def covers(clause: dict[str, Any], as_of: str) -> bool | None:
+    """条款的生效区间是否覆盖某个时点。
+
+    Args:
+        clause: 任何带 effective_from / effective_to 的条款或证据字典。
+        as_of: 已过 parse_as_of 的日期。
+
+    Returns:
+        True 覆盖，False 不覆盖，None 表示生效起始日缺失、判不了。
+
+    三态而不是布尔：把"判不了"并进 False，就等于替 TTC 里日期没维护的条款断言
+    "它当时不适用"，这是凭空造出来的结论。调用方必须把这类条款单独计数报出来。
+    ISO 日期字符串按字典序比较即为时间序，所以不需要转 date 对象。
+    """
+    start = clause.get("effective_from")
+    if start is None:
+        return None
+    end = clause.get("effective_to")
+    return start <= as_of and (end is None or as_of <= end)
 
 
 def _bigrams(text: str) -> set[str]:
@@ -58,14 +108,43 @@ def snippet(query: str, content: str, width: int = 120) -> str:
 class SearchResult(NamedTuple):
     hits: list[dict[str, Any]]
     total_candidates: int
+    # 时点检索下因缺生效日期而判不了、被排除的条数。默认 0，不传的实现照旧工作
+    undated_excluded: int = 0
 
 
 class RegulationSource(Protocol):
     def search(
-        self, query: str, tax_category: str | None, include_historical: bool, limit: int
-    ) -> SearchResult: ...
+        self,
+        query: str,
+        tax_category: str | None,
+        include_historical: bool,
+        limit: int,
+        as_of: str | None = None,
+    ) -> SearchResult:
+        """检索条款。
 
-    def fetch(self, clause_id: str) -> dict[str, Any] | None: ...
+        `as_of` 与 `include_historical` 管的是两个不同的问题，不要混用：
+        `include_historical` 按**当前状态**放行（回答"这政策还有效吗"），
+        `as_of` 按**生效区间**过滤且当前状态完全不参与（回答"当时适用什么"）——
+        一条今天已 SUPERSEDED 的条款，正是它当年的正确依据。
+
+        Raises:
+            NotImplementedError: 该源没有生效日期字段，无法按时点检索。
+                必须显式拒绝而不是忽略 as_of 照常返回：忽略等于拿今天的法规
+                回答"当年适用什么"，是实打实的错误结论。
+        """
+        ...
+
+    def fetch(self, clause_id: str, as_of: str | None = None) -> dict[str, Any] | None:
+        """取条款完整正文。
+
+        `as_of` 必须与检索时用的时点一致。缺省取最新已发布版本——但在时点检索场景下
+        那是**错的版本**：检索命中的是当年那一版，取全文却拿回现行版，结论会整个反过来。
+
+        Raises:
+            NotImplementedError: 该源取不到历史版本正文。
+        """
+        ...
 
 
 # 任何 RegulationSource 实现返回的每条命中都必须带的证据字段。
@@ -75,14 +154,17 @@ EVIDENCE_FIELDS = frozenset({
 })
 
 
-def check_source_contract(source: RegulationSource, hit_query: str, known_id: str, missing_id: str) -> None:
-    """两个 RegulationSource 实现必须过的同一组断言。
+def check_source_contract(
+    source: RegulationSource, hit_query: str, known_id: str, missing_id: str, as_of_hit: str
+) -> None:
+    """每个 RegulationSource 实现必须过的同一组断言。
 
     Args:
         source: 待检验的实现。
         hit_query: 一个确定能命中的查询。
         known_id: 该实现里确定存在的 clause_id。
         missing_id: 确定不存在的 clause_id。
+        as_of_hit: 用于时点检索的日期；源不支持 as_of 时该值不影响结果。
     """
     result = source.search(hit_query, None, False, 5)
     assert result.hits, result
@@ -98,10 +180,30 @@ def check_source_contract(source: RegulationSource, hit_query: str, known_id: st
     historical = source.search(hit_query, None, True, 5).hits
     assert all(h["clause_status"] != "DRAFT" for h in historical), historical
 
+    # 时点检索只有两种合法反应：如实按生效区间过滤，或显式拒绝。
+    # 第三种"忽略 as_of 照常返回"是错的，而且错得看不出来，所以这里必须二选一地钉死。
+    try:
+        dated = source.search(hit_query, None, False, 5, as_of_hit)
+    except NotImplementedError:
+        pass
+    else:
+        for hit in dated.hits:
+            assert covers(hit, as_of_hit) is True, hit
+        assert all(h["clause_status"] not in NEVER_EVIDENCE for h in dated.hits), dated.hits
+
     full = source.fetch(known_id)
     assert full is not None and "content" in full, full
     assert EVIDENCE_FIELDS <= set(full), full
     assert content_hash(full["content"]) == full["content_hash"], full
+
+    # fetch 的时点必须和 search 的时点对得上，否则"按当年那一版检索、按现行版取全文"
+    # 会给出恰好相反的结论，而且从返回值里看不出哪里错了
+    try:
+        dated_full = source.fetch(known_id, as_of_hit)
+    except NotImplementedError:
+        pass
+    else:
+        assert dated_full is None or covers(dated_full, as_of_hit) is True, dated_full
 
     assert source.fetch(missing_id) is None
 
@@ -113,14 +215,33 @@ class LocalJsonSource:
         self._clauses: tuple[dict[str, Any], ...] = tuple(raw["clauses"])
 
     def search(
-        self, query: str, tax_category: str | None, include_historical: bool, limit: int
+        self,
+        query: str,
+        tax_category: str | None,
+        include_historical: bool,
+        limit: int,
+        as_of: str | None = None,
     ) -> SearchResult:
-        pool = [
-            c
-            for c in self._clauses
-            if (include_historical or c["clause_status"] in ACTIVE_STATUSES)
-            and (tax_category is None or c["tax_category"] == tax_category)
-        ]
+        pool: list[dict[str, Any]] = []
+        undated = 0
+        for c in self._clauses:
+            # 这道原先漏了：`include_historical or ...` 会把 DRAFT 一并放出来。
+            # 样本库里一条草稿都没有，契约里"草稿永不作为证据"那条断言就一直是空过的
+            if c["clause_status"] in NEVER_EVIDENCE:
+                continue
+            if tax_category is not None and c["tax_category"] != tax_category:
+                continue
+            if as_of is not None:
+                # 时点检索下不看当前状态：今天已 SUPERSEDED 的那版正是 as_of 当天的正确依据
+                covered = covers(c, as_of)
+                if covered is None:
+                    undated += 1
+                    continue
+                if not covered:
+                    continue
+            elif not include_historical and c["clause_status"] not in ACTIVE_STATUSES:
+                continue
+            pool.append(c)
         scored = sorted(
             ((score(query, c["title"], c["content"]), c) for c in pool), key=lambda p: p[0], reverse=True
         )
@@ -133,14 +254,22 @@ class LocalJsonSource:
             if scored and scored[0][0] >= MIN_TOP_SCORE
             else []
         )
-        return SearchResult(hits, len(pool))
+        return SearchResult(hits, len(pool), undated)
 
-    def fetch(self, clause_id: str) -> dict[str, Any] | None:
-        # 同一 clause_id 可能对应多条 revision（样本里 AD-VAT-CN-00003 有 1、2 两版）；
-        # 对齐 TTC queryTlpInfo 的语义，取 revision 最大的一条，历史版本留给 P1.3 的 fetch_history
-        candidates = [c for c in self._clauses if self._clause_id(c) == clause_id]
+    def fetch(self, clause_id: str, as_of: str | None = None) -> dict[str, Any] | None:
+        # 同一 clause_id 可能对应多条 revision（样本里 AD-VAT-CN-00003 有 1、2 两版）。
+        # 草稿在这里也要挡掉：search 给不出草稿的 clause_id，但用户可以直接把号报给模型
+        candidates = [
+            c
+            for c in self._clauses
+            if self._clause_id(c) == clause_id and c["clause_status"] not in NEVER_EVIDENCE
+        ]
+        if as_of is not None:
+            candidates = [c for c in candidates if covers(c, as_of) is True]
         if not candidates:
             return None
+        # 无 as_of 时对齐 TTC queryTlpInfo 的语义取最新版；有 as_of 时候选已被区间裁到
+        # 当时有效的那些，再取最大 revision 就是当时的现行版
         clause = max(candidates, key=lambda c: c["revision"])
         result = {**self._evidence(clause), "content": clause["content"]}
         if clause.get("supersedes"):
@@ -185,8 +314,37 @@ def _demo() -> None:
     historical = source.search("进项税额抵扣凭证", None, True, 5).hits
     assert any(h["clause_status"] == "SUPERSEDED" for h in historical), historical
 
+    # 草稿在任何开关下都不作为证据。样本里那条草稿与 00001 高度同题，不过滤会直接顶到前排
+    for flag in (False, True):
+        drafted = source.search("跨境研发服务零税率备案", None, flag, 10).hits
+        assert all(h["clause_status"] != "DRAFT" for h in drafted), (flag, drafted)
+
     assert source.search("遗产税起征点", None, False, 5).hits == []
     assert source.fetch("AD-VAT-CN-99999") is None
+
+    # 时点检索：2024-06 有效的是 AD-VAT-CN-00003 的 revision 1（今天已 SUPERSEDED），
+    # 不是现行的 revision 2。状态过滤在 as_of 下必须让位，否则回答不了"当年适用什么"
+    past = {(h["clause_id"], h["revision"]) for h in source.search("进项税额抵扣凭证", None, False, 5, "2024-06-01").hits}
+    assert ("AD-VAT-CN-00003", 1) in past, past
+    assert ("AD-VAT-CN-00003", 2) not in past, past
+    now = {(h["clause_id"], h["revision"]) for h in source.search("进项税额抵扣凭证", None, False, 5, "2026-06-01").hits}
+    assert ("AD-VAT-CN-00003", 2) in now, now
+    assert ("AD-VAT-CN-00003", 1) not in now, now
+    # 早于全库最早生效日：必须空手而归，不能退化成"忽略 as_of 照常返回"
+    assert source.search("进项税额抵扣凭证", None, False, 5, "2000-01-01").hits == []
+
+    assert parse_as_of("2024-06-01") == "2024-06-01"
+    for bad in ("2024-06", "2024年6月1日", "20240601", "2024-02-31"):
+        try:
+            parse_as_of(bad)
+            raise AssertionError(f"{bad!r} 应当被拒")
+        except ValueError:
+            pass
+
+    assert covers({"effective_from": "2024-01-01", "effective_to": None}, "2024-06-01") is True
+    assert covers({"effective_from": "2025-01-01", "effective_to": None}, "2024-06-01") is False
+    # 判不了必须是 None 而不是 False：并进 False 等于替没维护日期的条款断言"当时不适用"
+    assert covers({"effective_from": None, "effective_to": None}, "2024-06-01") is None
 
     # AD-VAT-CN-00003 有两版；fetch 按 TTC queryTlpInfo 语义只返回 revision 最大的一版
     full = source.fetch("AD-VAT-CN-00003")
@@ -194,7 +352,19 @@ def _demo() -> None:
     assert full["supersedes_revision"] == 1, full
     assert full["content_hash"] == content_hash(full["content"])
 
-    check_source_contract(source, "跨境研发服务零税率需要什么条件", "AD-VAT-CN-00001", "AD-VAT-CN-99999")
+    # 带时点取全文必须拿到当年那一版。这条不成立时 as_of 检索就是个陷阱：命中的是
+    # revision 1 的片段，取回来的却是 revision 2 的正文，结论正好反过来
+    assert source.fetch("AD-VAT-CN-00003", "2024-06-01")["revision"] == 1
+    assert "暂不得抵扣" in source.fetch("AD-VAT-CN-00003", "2024-06-01")["content"]
+    assert source.fetch("AD-VAT-CN-00003", "2026-06-01")["revision"] == 2
+    # 该时点这条还没生效：NOT_FOUND，不能退回去给现行版
+    assert source.fetch("AD-VAT-CN-00003", "2020-01-01") is None
+    # 草稿不能凭 clause_id 直接取到——search 给不出这个号，但用户可以直接报给模型
+    assert source.fetch("AD-VAT-CN-00099") is None
+
+    check_source_contract(
+        source, "跨境研发服务零税率需要什么条件", "AD-VAT-CN-00001", "AD-VAT-CN-99999", "2026-06-01"
+    )
     print("sources self-check ok")
 
 

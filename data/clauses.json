@@ -1,5 +1,5 @@
 {
-  "_note": "本地样本，非真实法规，仅用于 demo 验证检索与引用链路。真实数据由 TTC 提供，字段命名对齐 source_id / revision / effective_from。source_id 必须覆盖真实语料里出现过的全部形态（含 General 这样的混大小写段、CN/CO 这样的斜杠段），否则本地测不出真实形态的解析 bug——引用正则漏掉斜杠形态就是这样漏过去的。编号一律虚构，不借用真实条款号。",
+  "_note": "本地样本，非真实法规，仅用于 demo 验证检索与引用链路。真实数据由 TTC 提供，字段命名对齐 source_id / revision / effective_from。source_id 必须覆盖真实语料里出现过的全部形态（含 General 这样的混大小写段、CN/CO 这样的斜杠段），否则本地测不出真实形态的解析 bug——引用正则漏掉斜杠形态就是这样漏过去的。clause_status 同理必须四种齐全（PUBLISHED/SUPERSEDED/REVOKED/DRAFT）：样本里一条 DRAFT 都没有时，契约里「草稿永不作为证据」那条断言是空过的，LocalJsonSource 漏掉 DRAFT 过滤就是这样漏过去的。编号一律虚构，不借用真实条款号。",
   "clauses": [
     {
       "source_id": "AD-VAT-CN-00001",
@@ -217,6 +217,18 @@
       "effective_from": "2024-07-01",
       "effective_to": null,
       "content": "缔约国一方企业在缔约国另一方的建筑工地、建筑、装配或安装工程，或者与其有关的监督管理活动，仅当该工地、工程或活动持续超过 183 天时，才构成在该另一方的固定营业场所。计算持续期间时，同一工程项目下相互关联的多个合同应当合并计算，中途停工的日期不予扣除。"
+    },
+    {
+      "source_id": "AD-VAT-CN-00099",
+      "revision": 1,
+      "clause_status": "DRAFT",
+      "tlp_number": "财政部 税务总局公告2026年第X号（征求意见稿）第二条",
+      "title": "跨境应税服务零税率备案手续简化（征求意见稿）",
+      "tax_category": "增值税",
+      "jurisdiction": "CN",
+      "effective_from": null,
+      "effective_to": null,
+      "content": "境内单位向境外单位提供研发服务、设计服务适用增值税零税率的，取消出口退（免）税事前备案，改为在纳税申报时一并报送书面合同与境外收汇凭证。本条仍处于征求意见阶段，尚未发布生效，不得作为办税依据。"
     }
   ]
 }
