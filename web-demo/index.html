@@ -208,7 +208,13 @@ async function ask() {
       body: JSON.stringify({ question, session_id: sessionId }),
     });
     if (!res.ok) {
-      text.innerHTML = `<span class="ev fail">HTTP ${res.status}：${esc(await res.text())}</span>`;
+      const body = await res.text();
+      try {
+        const err = JSON.parse(body);
+        text.innerHTML = `<span class="ev fail">HTTP ${res.status}（${esc(err.code)}）：${esc(err.message)}</span>`;
+      } catch {
+        text.innerHTML = `<span class="ev fail">HTTP ${res.status}：${esc(body)}</span>`;
+      }
       return;
     }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -233,6 +239,8 @@ async function ask() {
         } else if (e.type === 'done') {
           sessionId = e.session_id;
           box.appendChild(evidence(e, tools));
+        } else if (e.type === 'error') {
+          text.innerHTML += `<div class="ev fail">流式回答中断（${esc(e.code)}）：${esc(e.message)}<br>trace：${esc(e.trace_id || '-')}</div>`;
         }
         $('chat').scrollTop = 1e9;
       }
@@ -253,7 +261,7 @@ function evidence(done, tools) {
     <div><span class="k">引用校验：</span>${bad
       ? `<span class="fail">不通过</span><ul>${done.citation_problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`
       : '<span class="pass">通过</span>'}</div>
-    <div><span class="k">身份：</span>${esc(done.auth_mode)} · <span class="k">会话：</span>${esc(done.session_id)}</div>`;
+    <div><span class="k">身份：</span>${esc(done.auth_mode)} · <span class="k">会话：</span>${esc(done.session_id)} · <span class="k">trace：</span>${esc(done.trace_id || '-')}</div>`;
   return d;
 }
 </script>

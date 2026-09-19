@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -36,10 +37,26 @@ from pyxis.app_factory import create_app as create_pyxis_app  # noqa: E402
 
 from tax_agent.audit import audit_citations  # noqa: E402
 from tax_agent.identity import bind, parse_token  # noqa: E402
+from tax_agent.log import TRACE_ID  # noqa: E402
 
 # 微服务名。pyxis 用它拼 openapi/docs 路由，内网网关也按这个前缀路由，
 # 所以业务接口一并挂在同一前缀下，本地和内网的 URL 完全一致。
 SERVICE_NAME = "/tax-agent"
+
+# 错误码取自技术设计文档 §8.3。只列现在真会发生的，其余（IDEMPOTENCY_CONFLICT /
+# MODEL_RATE_LIMITED 等）等有真实案例再加——猜一个码写进契约，前端会按它写分支。
+ERROR_CODES = {
+    PermissionError: "UNAUTHENTICATED",  # UserTokenProvider 缺用户 token 时抛
+}
+
+
+def _error(status: int, code: str, message: str, trace_id: str) -> JSONResponse:
+    """统一的错误响应体：前端按 `code` 分支，`trace_id` 用来找日志和上游。"""
+    return JSONResponse(
+        {"code": code, "message": message, "trace_id": trace_id},
+        status_code=status,
+        headers={"X-TRACERID": trace_id},
+    )
 
 
 def _load_dotenv_for_dev() -> None:
@@ -113,12 +130,19 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
     @app.post(f"{SERVICE_NAME}/chat")
     async def chat(body: ChatRequest, request: Request):
         """接一轮提问，SSE 流式吐回答，末帧带会话 ID 与引用校验结果。"""
+        # X-TRACERID 是 HIS 平台约定的链路头，网关有就用网关的，没有就我们生成。
+        # 不装 pyxis 的 TracingMiddleware：它在 call_next 返回后立刻 reset contextvar
+        # （middleware.py:26-29），而 SSE 的 body 是响应返回之后才流的，
+        # event_stream() 里的日志那时已经取不到值了。
+        trace_id = request.headers.get("x-tracerid") or uuid4().hex[:12]
+        TRACE_ID.set(trace_id)
+
         raw_token = request.headers.get("x-jwt-ms-token")
         try:
             identity = parse_token(raw_token, request.headers.get("x-jalor-userAccount"))
         except ValueError as exc:
             logger.warning("401：token 解析失败 - {}", exc)
-            return JSONResponse({"detail": str(exc)}, status_code=401)
+            return _error(401, "UNAUTHENTICATED", str(exc), trace_id)
 
         if body.session_id is None:
             session_id = session_manager.create_session(identity.isolate_key)
@@ -129,7 +153,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                 identity.isolate_key,
                 body.session_id,
             )
-            return JSONResponse({"detail": "forbidden"}, status_code=403)
+            return _error(403, "ACCESS_DENIED", "无权访问该会话", trace_id)
         else:
             session_id = body.session_id
 
@@ -148,55 +172,82 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             answer_parts: list[str] = []
             # 只放 thread_id：token 一旦进 config，二期换持久化 checkpointer 后会落盘
             config = {"configurable": {"thread_id": session_id}}
-            async for msg, _meta in agent.astream(
-                {"messages": [{"role": "user", "content": body.question}]},
-                config=config,
-                stream_mode="messages",
-            ):
-                if isinstance(msg, ToolMessage):
-                    tool_messages.append(msg)
-                    # stream_mode="messages" 会吐出 ReAct 循环里**每一轮**的模型输出，包括
-                    # "两个检索均无结果，换个关键词再试" 这类中间独白。它们不是答案：混进
-                    # answer 会污染 audit_citations——中间轮提到过的条款号能把一个终答里
-                    # 其实没引用的回答"洗"成合格。清掉之后 answer 只剩最后一次工具返回之后
-                    # 的文本，也就是终答。独白照旧逐字流给用户，前端用这个 tool 帧分段显示。
-                    answer_parts.clear()
-                    yield _sse({"type": "tool", "name": msg.name})
-                elif msg.content:
-                    answer_parts.append(msg.content)
-                    yield _sse({"type": "token", "text": msg.content})
+            try:
+                async for msg, _meta in agent.astream(
+                    {"messages": [{"role": "user", "content": body.question}]},
+                    config=config,
+                    stream_mode="messages",
+                ):
+                    if isinstance(msg, ToolMessage):
+                        tool_messages.append(msg)
+                        # stream_mode="messages" 会吐出 ReAct 循环里**每一轮**的模型输出，包括
+                        # "两个检索均无结果，换个关键词再试" 这类中间独白。它们不是答案：混进
+                        # answer 会污染 audit_citations——中间轮提到过的条款号能把一个终答里
+                        # 其实没引用的回答"洗"成合格。清掉之后 answer 只剩最后一次工具返回之后
+                        # 的文本，也就是终答。独白照旧逐字流给用户，前端用这个 tool 帧分段显示。
+                        answer_parts.clear()
+                        yield _sse({"type": "tool", "name": msg.name})
+                    elif msg.content:
+                        answer_parts.append(msg.content)
+                        yield _sse({"type": "token", "text": msg.content})
 
-            answer = "".join(answer_parts)
-            # 引用校验的证据集不能只看这次 HTTP 请求：同一 session 里追问时，模型常常
-            # 引用上一轮已经真实检索过的条款做延伸解读，这不是编造，只是"本轮"这个口径
-            # 划窄了。checkpointer 按 thread_id 存了整个会话的消息历史，取来做证据集，
-            # 既不放松防编造（引用的号仍必须来自某次真实工具返回），也不再误伤合法的
-            # 多轮解读。tool_names（下面"工具调用"展示）仍然只看本轮，两者用途不同。
-            state = await agent.aget_state(config)
-            session_tool_messages = [m for m in state.values["messages"] if isinstance(m, ToolMessage)]
-            problems = audit_citations(answer, session_tool_messages)
-            elapsed_ms = round((time.perf_counter() - started) * 1000)
-            tool_names = [m.name for m in tool_messages]
-            logger.info(
-                "一轮结束：session_id={} 耗时={}ms 工具调用={} 引用校验={}",
-                session_id,
-                elapsed_ms,
-                tool_names,
-                "通过" if not problems else "不通过",
-            )
-            if problems:
-                logger.warning("引用校验不通过：session_id={} 问题={}", session_id, problems)
-            yield _sse(
-                {
-                    "type": "done",
-                    "session_id": session_id,
-                    "auth_mode": identity.auth_mode,
-                    "tool_calls": tool_names,
-                    "citation_problems": problems,
-                }
-            )
+                answer = "".join(answer_parts)
+                # 引用校验的证据集不能只看这次 HTTP 请求：同一 session 里追问时，模型常常
+                # 引用上一轮已经真实检索过的条款做延伸解读，这不是编造，只是"本轮"这个口径
+                # 划窄了。checkpointer 按 thread_id 存了整个会话的消息历史，取来做证据集，
+                # 既不放松防编造（引用的号仍必须来自某次真实工具返回），也不再误伤合法的
+                # 多轮解读。tool_names（下面"工具调用"展示）仍然只看本轮，两者用途不同。
+                state = await agent.aget_state(config)
+                session_tool_messages = [m for m in state.values["messages"] if isinstance(m, ToolMessage)]
+                problems = audit_citations(answer, session_tool_messages)
+                elapsed_ms = round((time.perf_counter() - started) * 1000)
+                tool_names = [m.name for m in tool_messages]
+                logger.info(
+                    "一轮结束：session_id={} 耗时={}ms 工具调用={} 引用校验={}",
+                    session_id,
+                    elapsed_ms,
+                    tool_names,
+                    "通过" if not problems else "不通过",
+                )
+                if problems:
+                    logger.warning("引用校验不通过：session_id={} 问题={}", session_id, problems)
+                yield _sse(
+                    {
+                        "type": "done",
+                        "session_id": session_id,
+                        "auth_mode": identity.auth_mode,
+                        "tool_calls": tool_names,
+                        "citation_problems": problems,
+                        "trace_id": trace_id,
+                    }
+                )
+            except Exception as exc:
+                # 响应头早就发出去了（200 + text/event-stream），HTTP 状态码这时改不了，
+                # 只能在流里补一帧告诉前端出了什么事。不重新抛：抛出去只会让连接
+                # 无声无息地断掉，前端看到的是答案停在半截。
+                code = ERROR_CODES.get(type(exc), "UPSTREAM_UNAVAILABLE")
+                logger.exception("流式回答失败：session_id={} code={}", session_id, code)
+                # 截断：我们自己抛的异常消息都很短（errorCode/tracerId），但 httpx 和模型
+                # SDK 抛的会把整个响应体拼进消息，里面可能回显 prompt——而 prompt 里有条款正文。
+                # 排障靠 trace_id 和服务端那条带 traceback 的日志，前端不需要全文。
+                yield _sse({"type": "error", "code": code, "message": str(exc)[:200], "trace_id": trace_id})
+                return
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"X-TRACERID": trace_id})
+
+    @app.get("/actuator/health")
+    @app.get(f"{SERVICE_NAME}/health")
+    async def health():
+        """存活探针。
+
+        只报进程活着 + 当前检索源配置，**不主动探活上游**：真去调模型和 TTC 会让
+        探针变慢，还可能被 K8s 的高频探测打成对上游的压测。
+
+        Returns:
+            `{"status": "UP", "source": ...}`。
+        """
+        # ponytail: 只有进程存活 + 配置快照，等真有"进程活着但上游全挂"的事故再加依赖探活
+        return {"status": "UP", "source": os.getenv("TAX_AGENT_SOURCE", "local")}
 
     return app
 
@@ -254,6 +305,7 @@ def _demo() -> None:
     assert r.status_code == 200, r.text
     done = _parse_sse(r.text)[-1]
     assert done["type"] == "done" and done["auth_mode"] == "none" and done["session_id"]
+    assert done["trace_id"] and r.headers["x-tracerid"] == done["trace_id"], done
 
     # 2. 有 token 路径
     zhangsan_token = make_token({"uid": "zhangsan"})
@@ -285,6 +337,7 @@ def _demo() -> None:
         headers={"x-jwt-ms-token": lisi_token},
     )
     assert r.status_code == 403, r.text
+    assert r.json()["code"] == "ACCESS_DENIED", r.text
 
     # 4. 带网关头 x-jalor-userAccount 时，isolate_key 取网关头而非 token claim
     r = client.post(
@@ -327,6 +380,38 @@ def _demo() -> None:
     r = client2.post(f"{SERVICE_NAME}/chat", json={"question": "境外消费也算吗？", "session_id": sid})
     done = _parse_sse(r.text)[-1]
     assert done["citation_problems"] == [], done
+
+    # 6. 流式中途抛异常：连接不能无声断掉，末帧必须是 error 帧且状态码仍是 200
+    #    （响应头在流开始前就发出去了，这时已经改不了状态码）
+    class BoomAgent:
+        async def astream(self, _input, config=None, stream_mode=None):
+            yield AIMessageChunk(content="先吐一点……"), {}
+            raise RuntimeError("上游 TTC 5xx")
+            yield  # pragma: no cover - 让函数体是 async generator
+
+    client_boom = TestClient(create_app(agent=BoomAgent(), session_manager=SessionManager(MemorySessionBinding())))
+    r = client_boom.post(f"{SERVICE_NAME}/chat", json={"question": "你好"})
+    assert r.status_code == 200, r.text
+    last = _parse_sse(r.text)[-1]
+    assert last["type"] == "error" and last["code"] and last["trace_id"], last
+
+    # 6b. PermissionError 要映射到 UNAUTHENTICATED（ERROR_CODES 里注册过的类型）
+    class ForbiddenAgent:
+        async def astream(self, _input, config=None, stream_mode=None):
+            raise PermissionError("缺用户 token")
+            yield  # pragma: no cover
+
+    client_forbidden = TestClient(
+        create_app(agent=ForbiddenAgent(), session_manager=SessionManager(MemorySessionBinding()))
+    )
+    r = client_forbidden.post(f"{SERVICE_NAME}/chat", json={"question": "你好"})
+    assert r.status_code == 200, r.text
+    last = _parse_sse(r.text)[-1]
+    assert last["type"] == "error" and last["code"] == "UNAUTHENTICATED", last
+
+    # 7. 健康检查：两条路径都要通，不依赖任何真实 agent 调用
+    assert client.get("/actuator/health").json()["status"] == "UP"
+    assert client.get(f"{SERVICE_NAME}/health").json()["status"] == "UP"
 
     print("server self-check ok")
 
