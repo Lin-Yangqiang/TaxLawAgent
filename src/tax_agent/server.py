@@ -35,6 +35,7 @@ from eurekax.isolation.memory_session_binding import MemorySessionBinding  # noq
 from eurekax.isolation.session_manager import SessionManager  # noqa: E402
 from pyxis.app_factory import create_app as create_pyxis_app  # noqa: E402
 
+from tax_agent import config  # noqa: E402
 from tax_agent.audit import audit_citations  # noqa: E402
 from tax_agent.identity import bind, parse_token  # noqa: E402
 from tax_agent.log import TRACE_ID  # noqa: E402
@@ -57,31 +58,6 @@ def _error(status: int, code: str, message: str, trace_id: str) -> JSONResponse:
         status_code=status,
         headers={"X-TRACERID": trace_id},
     )
-
-
-def _load_dotenv_for_dev() -> None:
-    """联调时把 `.env` 读进环境变量。生产环境**不读**。
-
-    为什么需要：uvicorn 用 `--factory` 起服务时不经过 `cli.py`，没人加载 `.env`，
-    模型三件套会全缺，表现为启动即报"缺少模型配置环境变量"。
-
-    为什么要挡生产：`.env` 是开发者本机的配置（联调用的模型端点、应用级凭证），
-    在生产悄悄生效会让服务连到错误的后端，而且优先级问题极难排查。
-    生产由部署平台注入真实环境变量，设 `TAX_AGENT_ENV=prod` 关掉这里。
-
-    用 `setdefault`：已经导出到 shell 的变量优先，`.env` 只补没有的。
-    """
-    if os.getenv("TAX_AGENT_ENV") == "prod":
-        return
-    env_file = Path(__file__).resolve().parents[2] / ".env"
-    if not env_file.is_file():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-    logger.info("已加载 .env（联调用；生产设 TAX_AGENT_ENV=prod 关闭）")
 
 
 class ChatRequest(BaseModel):
@@ -118,7 +94,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
     from tax_agent.log import setup
 
     setup()  # uvicorn 用 --factory 调这个函数起服务，__main__ 只用于自检，日志配置放这里才覆盖真实入口
-    _load_dotenv_for_dev()  # 必须在 build_agent() 之前：模型三件套从环境变量读
+    config.load_dotenv()  # 必须在 build_agent() 之前：模型三件套从环境变量读
     if agent is None:
         from tax_agent.agent import build_agent
 
@@ -170,12 +146,13 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             started = time.perf_counter()
             tool_messages: list[ToolMessage] = []
             answer_parts: list[str] = []
-            # 只放 thread_id：token 一旦进 config，二期换持久化 checkpointer 后会落盘
-            config = {"configurable": {"thread_id": session_id}}
+            # 只放 thread_id：token 一旦进 config，二期换持久化 checkpointer 后会落盘。
+            # 不叫 config：模块里 `from tax_agent import config` 是环境变量模块，同名会遮蔽
+            run_config = {"configurable": {"thread_id": session_id}}
             try:
                 async for msg, _meta in agent.astream(
                     {"messages": [{"role": "user", "content": body.question}]},
-                    config=config,
+                    config=run_config,
                     stream_mode="messages",
                 ):
                     if isinstance(msg, ToolMessage):
@@ -197,7 +174,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                 # 划窄了。checkpointer 按 thread_id 存了整个会话的消息历史，取来做证据集，
                 # 既不放松防编造（引用的号仍必须来自某次真实工具返回），也不再误伤合法的
                 # 多轮解读。tool_names（下面"工具调用"展示）仍然只看本轮，两者用途不同。
-                state = await agent.aget_state(config)
+                state = await agent.aget_state(run_config)
                 session_tool_messages = [m for m in state.values["messages"] if isinstance(m, ToolMessage)]
                 problems = audit_citations(answer, session_tool_messages)
                 elapsed_ms = round((time.perf_counter() - started) * 1000)

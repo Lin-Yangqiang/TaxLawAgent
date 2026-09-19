@@ -1,6 +1,6 @@
 """联调冒烟脚本：用应用级凭证打一次真实 TTC 公有 API，确认链路通。
 
-字段形状已经从内网实测版本确认过了（见 ttc_client.TtcPublicSource），所以这个脚本
+字段形状已经从内网实测版本确认过了（见 ttc_public.TtcPublicSource），所以这个脚本
 不再用来探字段，只回答一个问题：**凭证 + base_url + 网关路径这一串配对了没有**。
 拿到内网访问权限时跑一次，比启动整个 Agent 再猜哪一层断了快得多。
 
@@ -22,14 +22,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-# 复用 cli.py 手写的 .env 解析，不为一个冒烟脚本引 python-dotenv
-from cli import _load_env  # noqa: E402
+# 复用 config.py 的 .env 解析，不为一个冒烟脚本引 python-dotenv
+from tax_agent.config import load_dotenv  # noqa: E402
 
 DEFAULT_QUERY = "增值税"
 
 
 def main() -> None:
-    _load_env()
+    load_dotenv()
 
     import os
 

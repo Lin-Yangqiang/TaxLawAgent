@@ -29,6 +29,7 @@ from eurekax.openai_compatible import ChatOpenAICompatible  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from loguru import logger  # noqa: E402
 
+from tax_agent import config  # noqa: E402
 from tax_agent import nettls  # noqa: E402
 from tax_agent.tools import TOOLS  # noqa: E402
 
@@ -60,9 +61,7 @@ SYSTEM_PROMPT = """你是税法检索与解读助手，服务对象是企业税�
 
 def build_model() -> ChatOpenAICompatible:
     """从环境变量构造模型。缺配置时直接失败，不降级成假 Agent。"""
-    missing = [k for k in ("TAX_AGENT_BASE_URL", "TAX_AGENT_API_KEY", "TAX_AGENT_MODEL") if not os.getenv(k)]
-    if missing:
-        raise RuntimeError(f"缺少模型配置环境变量：{', '.join(missing)}（参考 .env.example）")
+    config.check("model")
     # 法规解读要可复现，能设 0 就设 0；但部分托管端点只接受自己的默认值
     # （kimi-for-coding 强制 temperature=1），所以不写死，不配就用端点默认
     temperature = os.getenv("TAX_AGENT_TEMPERATURE")

@@ -20,19 +20,6 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")  # Windows 控制台默认 GBK，中文和省略号会炸
 
 
-def _load_env() -> None:
-    env_file = ROOT / ".env"
-    if not env_file.is_file():
-        return
-    import os
-
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-
-
 def ask(agent, question: str, thread_id: str) -> None:
     from tax_agent.audit import audit_citations
 
@@ -100,7 +87,9 @@ def main() -> int:
         state: dict = {}
         turn = lambda q: ask_http(url, q, state)  # noqa: E731
     else:
-        _load_env()
+        from tax_agent.config import load_dotenv
+
+        load_dotenv()
         from tax_agent.agent import build_agent
 
         try:

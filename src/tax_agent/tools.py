@@ -19,6 +19,7 @@ from loguru import logger
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tax_agent import config  # noqa: E402
 from tax_agent.sources import (  # noqa: E402
     LocalJsonSource,
     RegulationSource,
@@ -52,8 +53,10 @@ def _build_source() -> RegulationSource:
         raise ValueError(
             f"TAX_AGENT_SOURCE 取值不认识：{kind!r}，可选 local / ttc_public / ttc_user"
         )
+    config.check("source")
 
-    from tax_agent.ttc_client import TtcPublicSource, TtcSource
+    from tax_agent.ttc_client import TtcSource
+    from tax_agent.ttc_public import TtcPublicSource
 
     base_url = os.environ["TTC_BASE_URL"]
     if kind == "ttc_user":

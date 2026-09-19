@@ -14,11 +14,15 @@
 **为什么这件事值得单独一个模块**：`verify=False` 对 TTC 请求泄露的是查询内容，
 对模型请求泄露的是 `api_key`（中间人可直接拿走凭证），性质不同但同样不该默认发生。
 三个调用点各写一遍 `verify=False` 迟早漂移成不一致，集中在这里只有一处可审计。
+
+除了配置本身，这里还提供一个已经套上这套配置的 `post`，供各 RegulationSource
+实现直接复用，不用各自拼一遍 `**client_kwargs()`。
 """
 
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -74,6 +78,21 @@ def client_kwargs() -> dict[str, object]:
     return {"verify": verify_option(), "trust_env": trust_env()}
 
 
+def post(url: str, body: dict[str, Any], headers: dict[str, str], timeout: float) -> dict[str, Any]:
+    """套用本模块 TLS/代理配置的 `httpx.post`，供各 RegulationSource 实现共用。
+
+    Args:
+        url: 请求地址。
+        body: JSON 请求体。
+        headers: 请求头。
+        timeout: 超时秒数。
+
+    Returns:
+        响应体解析后的 JSON。
+    """
+    return httpx.post(url, json=body, headers=headers, timeout=timeout, **client_kwargs()).json()
+
+
 def _demo() -> None:
     import tempfile
 
@@ -113,6 +132,13 @@ def _demo() -> None:
 
     # 参数名必须与 httpx 对得上，拼错了要在自检里暴露而不是运行时
     httpx.Client(**client_kwargs()).close()
+
+    # 要防的是 post() 里传给 httpx.post 的那串关键字拼错。httpx.post 的签名就能回答，
+    # 不用发真实请求；断言 post() 自己的参数名则什么都证明不了——那是拿代码跟自己对账。
+    import inspect
+
+    inspect.signature(httpx.post).bind("https://x", json={}, headers={}, timeout=1.0, **client_kwargs())
+
     print("nettls self-check ok")
 
 
