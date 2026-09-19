@@ -87,6 +87,9 @@ def sqlalchemy_pool() -> SQLAlchemyPool:
             host=os.environ["TAX_AGENT_DB_HOST"],
             port=os.environ["TAX_AGENT_DB_PORT"],
             database=os.environ["TAX_AGENT_DB_NAME"],
+            # SDK 的坑（pyxis/rdb/sqlalchemy_pool.py 第一行 connect_args.pop(...)）：
+            # 不传这个参数、默认值是 None 时会直接 AttributeError，不是可以省略的冗余参数
+            connect_args={},
         )
     return _pool
 

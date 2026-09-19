@@ -10,9 +10,9 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolCallId, tool
 from loguru import logger
 
 # 直接 `python src/tax_agent/tools.py` 跑自检时 sys.path[0] 是本文件目录而非 src/
@@ -20,6 +20,7 @@ if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tax_agent import config  # noqa: E402
+from tax_agent.ledger import instrument  # noqa: E402
 from tax_agent.sources import (  # noqa: E402
     LocalJsonSource,
     RegulationSource,
@@ -108,12 +109,16 @@ def _undated_note(count: int) -> dict[str, str]:
 
 
 @tool
+@instrument
 def search_regulation(
     query: str,
     tax_category: str | None = None,
     include_historical: bool = False,
     as_of: str | None = None,
     limit: int = 5,
+    # 注入参数，对模型隐藏（不出现在 tool_call_schema / convert_to_openai_tool 里），
+    # 供 instrument 装饰器记账用，不写进下面的 Args
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> dict[str, Any]:
     """按自然语言描述检索税法条款，返回条款摘要与证据引用。
 
@@ -213,7 +218,13 @@ def search_regulation(
 
 
 @tool
-def fetch_clause(clause_id: str, as_of: str | None = None) -> dict[str, Any]:
+@instrument
+def fetch_clause(
+    clause_id: str,
+    as_of: str | None = None,
+    # 注入参数，对模型隐藏，供 instrument 装饰器记账用，不写进下面的 Args
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> dict[str, Any]:
     """按 clause_id 获取条款完整正文与证据信息。
 
     Args:
@@ -269,65 +280,88 @@ def known_clause_ids() -> set[str] | None:
 
 
 def _demo() -> None:
-    hits = search_regulation.invoke({"query": "跨境研发服务零税率需要什么条件"})
+    import json as _json
+
+    from tax_agent import ledger
+
+    def call(t, **kwargs):
+        """按真实 ToolCall 形状调用：带 InjectedToolCallId 的工具拒绝普通 dict 入参。
+
+        这种调用形状下 `invoke` 返回的是 ToolMessage（content 是 JSON 字符串），
+        不是裸 dict，这里解回 dict 让下面的断言不用改。
+        """
+        msg = t.invoke({"name": t.name, "args": kwargs, "id": "selfcheck", "type": "tool_call"})
+        return _json.loads(msg.content)
+
+    # schema 没被破坏、且 tool_call_id 对模型隐藏：instrument 套在 @tool 内层，
+    # 如果哪天它丢了 functools.wraps，schema 会静默退化成 **kwargs，模型就再也调不对
+    # 参数了；而 tool_call_id 一旦漏进 tool_call_schema，模型会试图自己编一个 ID
+    for t in (search_regulation, fetch_clause):
+        assert "tool_call_id" in t.args_schema.model_fields, t.name
+        assert "tool_call_id" not in t.tool_call_schema.model_fields, t.name
+    assert set(search_regulation.tool_call_schema.model_fields) == {
+        "query", "tax_category", "include_historical", "as_of", "limit"
+    }, search_regulation.tool_call_schema.model_fields
+
+    hits = call(search_regulation, query="跨境研发服务零税率需要什么条件")
     assert hits["status"] == "OK", hits
     assert hits["hits"][0]["clause_id"] == "AD-VAT-CN-00001", hits["hits"][0]
 
     # 默认不得返回已废止或被替代的版本，否则会给出过期结论
-    statuses = {h["clause_status"] for h in search_regulation.invoke({"query": "进项税额抵扣凭证"})["hits"]}
+    statuses = {h["clause_status"] for h in call(search_regulation, query="进项税额抵扣凭证")["hits"]}
     assert statuses == {"PUBLISHED"}, statuses
-    historical = search_regulation.invoke({"query": "进项税额抵扣凭证", "include_historical": True})
+    historical = call(search_regulation, query="进项税额抵扣凭证", include_historical=True)
     assert any(h["clause_status"] == "SUPERSEDED" for h in historical["hits"]), historical
 
-    full = fetch_clause.invoke({"clause_id": "AD-VAT-CN-00003"})
+    full = call(fetch_clause, clause_id="AD-VAT-CN-00003")
     assert full["status"] == "OK" and full["revision"] == 2 and full["supersedes_revision"] == 1, full
     assert full["content_hash"] == content_hash(full["content"])
 
-    assert fetch_clause.invoke({"clause_id": "AD-VAT-CN-99999"})["status"] == "NOT_FOUND"
+    assert call(fetch_clause, clause_id="AD-VAT-CN-99999")["status"] == "NOT_FOUND"
 
     # 真实触发过的 bug：税种判断错误（"税收协定"条款被误传成 企业所得税）导致误过滤，
     # 不放宽会漏检；放宽后必须命中，且要带上放宽标记，让模型知道自己的税种判断可能错了
-    relaxed = search_regulation.invoke({"query": "常设机构认定", "tax_category": "企业所得税"})
+    relaxed = call(search_regulation, query="常设机构认定", tax_category="企业所得税")
     assert relaxed["status"] == "OK", relaxed
     assert relaxed["hits"][0]["clause_id"] == "AD-TA-General-00401", relaxed["hits"][0]
     assert relaxed["applied_filters"]["tax_category"] is None, relaxed
     assert "relaxed_filter" in relaxed, relaxed
 
     # 真正查无此物：放宽税种也不该无中生有，也不该凭空冒出 historical_candidates
-    dead = search_regulation.invoke({"query": "遗产税起征点"})
+    dead = call(search_regulation, query="遗产税起征点")
     assert dead["status"] == "NO_EVIDENCE" and "historical_candidates" not in dead, dead
-    assert search_regulation.invoke({"query": "遗产税起征点", "tax_category": "企业所得税"})["status"] == "NO_EVIDENCE"
+    assert call(search_regulation, query="遗产税起征点", tax_category="企业所得税")["status"] == "NO_EVIDENCE"
 
     # 时点检索：同一个 clause_id 在两个时点应当落到不同 revision
-    past = search_regulation.invoke({"query": "进项税额抵扣凭证", "as_of": "2024-06-01"})
+    past = call(search_regulation, query="进项税额抵扣凭证", as_of="2024-06-01")
     assert past["status"] == "OK", past
     assert {(h["clause_id"], h["revision"]) for h in past["hits"]} >= {("AD-VAT-CN-00003", 1)}, past
     assert all(h["revision"] != 2 or h["clause_id"] != "AD-VAT-CN-00003" for h in past["hits"]), past
     assert past["hits"][0]["clause_status"] != "DRAFT", past
 
     # 取全文必须跟着同一个时点走，否则「按当年那版检索、按现行版取正文」，结论正好反过来
-    past_full = fetch_clause.invoke({"clause_id": "AD-VAT-CN-00003", "as_of": "2024-06-01"})
+    past_full = call(fetch_clause, clause_id="AD-VAT-CN-00003", as_of="2024-06-01")
     assert past_full["status"] == "OK" and past_full["revision"] == 1, past_full
     assert "暂不得抵扣" in past_full["content"], past_full
-    assert fetch_clause.invoke({"clause_id": "AD-VAT-CN-00003"})["revision"] == 2
+    assert call(fetch_clause, clause_id="AD-VAT-CN-00003")["revision"] == 2
     # 该时点尚未生效的，要说清是"当时还没生效"，不能退回去给现行版
-    not_yet = fetch_clause.invoke({"clause_id": "AD-VAT-CN-00003", "as_of": "2020-01-01"})
+    not_yet = call(fetch_clause, clause_id="AD-VAT-CN-00003", as_of="2020-01-01")
     assert not_yet["status"] == "NOT_FOUND" and "2020-01-01" in not_yet["message"], not_yet
 
     # 日期写错要给模型一条能自己改正的返回，而不是抛异常，也不能替它把"2024年3月"猜成 1 号
     for bad in ("2024-03", "2024年3月"):
-        invalid = search_regulation.invoke({"query": "进项税额抵扣凭证", "as_of": bad})
+        invalid = call(search_regulation, query="进项税额抵扣凭证", as_of=bad)
         assert invalid["status"] == "INVALID_AS_OF", invalid
 
     # 死角：问已废止政策时默认检索返回 0，模型会回"检索不到"——事实是"检索到了，已废止"。
     # 探针必须报出历史池里有命中，但**不能**把历史条款当结果返回
-    revoked = search_regulation.invoke({"query": "生产、生活性服务业进项税额加计抵减还能享受吗"})
+    revoked = call(search_regulation, query="生产、生活性服务业进项税额加计抵减还能享受吗")
     assert revoked["status"] == "NO_EVIDENCE", revoked
     assert revoked["historical_candidates"] >= 1, revoked
     assert revoked["hits"] == [], revoked
     # 模型按提示重查，这次才拿得到那条废止条款
-    confirmed = search_regulation.invoke(
-        {"query": "生产、生活性服务业进项税额加计抵减还能享受吗", "include_historical": True}
+    confirmed = call(
+        search_regulation, query="生产、生活性服务业进项税额加计抵减还能享受吗", include_historical=True
     )
     assert confirmed["status"] == "OK", confirmed
     assert any(h["clause_id"] == "AD-VAT-CN-00005" for h in confirmed["hits"]), confirmed
@@ -347,13 +381,25 @@ def _demo() -> None:
     original_source = _SOURCE
     _SOURCE = _NoAsOf()
     try:
-        unsupported = search_regulation.invoke({"query": "x", "as_of": "2024-06-01"})
+        unsupported = call(search_regulation, query="x", as_of="2024-06-01")
         assert unsupported["status"] == "UNSUPPORTED_AS_OF", unsupported
         # 两个 TTC 源的 fetch 都取不到历史正文，异常不能穿透工具层炸在模型面前
-        unsupported = fetch_clause.invoke({"clause_id": "AD-VAT-CN-00003", "as_of": "2024-06-01"})
+        unsupported = call(fetch_clause, clause_id="AD-VAT-CN-00003", as_of="2024-06-01")
         assert unsupported["status"] == "UNSUPPORTED_AS_OF", unsupported
     finally:
         _SOURCE = original_source
+
+    # 装饰器真的记下了账：instrument 套在 @tool 内层，实际调用要能落进 run 的 tool_calls 里
+    run = ledger.begin_run("thread-selfcheck", "selfcheck-actor", "trace-selfcheck", "跨境研发服务零税率需要什么条件")
+    call(search_regulation, query="跨境研发服务零税率需要什么条件")
+    ledger.finish_run(run, "SUCCEEDED")
+    assert len(run.tool_calls) == 1, run.tool_calls
+    recorded = run.tool_calls[0]
+    assert recorded.tool_name == "search_regulation", recorded
+    assert recorded.tool_call_id == "selfcheck", recorded
+    assert recorded.evidence_count >= 1, recorded
+    assert recorded.status == "OK", recorded
+
     print("tools self-check ok")
 
 

@@ -37,6 +37,7 @@ from eurekax.isolation.session_manager import SessionManager  # noqa: E402
 from pyxis.app_factory import create_app as create_pyxis_app  # noqa: E402
 
 from tax_agent import config  # noqa: E402
+from tax_agent import ledger  # noqa: E402
 from tax_agent import persistence  # noqa: E402
 from tax_agent.audit import audit_citations  # noqa: E402
 from tax_agent.identity import bind, parse_token  # noqa: E402
@@ -150,6 +151,9 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             session_id = body.session_id
 
         bind(identity)
+        # 必须在这里（chat() 里）开 run，不能挪进 event_stream()：ContextVar 要在
+        # 生成器被创建之前就设好，工具在 event_stream() 内被调用时才看得见那个 list
+        run = ledger.begin_run(session_id, identity.isolate_key, trace_id, body.question)
         logger.info(
             "请求进入：session_id={} auth_mode={} 问题={!r}",
             session_id,
@@ -162,6 +166,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             started = time.perf_counter()
             tool_messages: list[ToolMessage] = []
             answer_parts: list[str] = []
+            usage: dict[str, int] = {}
             # 只放 thread_id：token 一旦进 config，二期换持久化 checkpointer 后会落盘。
             # 不叫 config：模块里 `from tax_agent import config` 是环境变量模块，同名会遮蔽
             run_config = {"configurable": {"thread_id": session_id}}
@@ -171,6 +176,14 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                     config=run_config,
                     stream_mode="messages",
                 ):
+                    # 必须放在下面两个分支之前：带 usage 的那个 chunk 往往 content 是空的，
+                    # 走不到 elif，会被错过。不是所有端点都回 usage（本地托管端点不一定回），
+                    # 拿不到就留空字典，不要编一个假值
+                    meta = getattr(msg, "usage_metadata", None)
+                    if meta:
+                        for k in ("input_tokens", "output_tokens", "total_tokens"):
+                            usage[k] = usage.get(k, 0) + meta.get(k, 0)
+
                     if isinstance(msg, ToolMessage):
                         tool_messages.append(msg)
                         # stream_mode="messages" 会吐出 ReAct 循环里**每一轮**的模型输出，包括
@@ -204,6 +217,8 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                 )
                 if problems:
                     logger.warning("引用校验不通过：session_id={} 问题={}", session_id, problems)
+                # quality_json 装 citation_problems：这是本 Agent 唯一的自动质量信号
+                ledger.finish_run(run, "SUCCEEDED", usage=usage or None, quality={"citation_problems": problems})
                 yield _sse(
                     {
                         "type": "done",
@@ -220,11 +235,19 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                 # 无声无息地断掉，前端看到的是答案停在半截。
                 code = ERROR_CODES.get(type(exc), "UPSTREAM_UNAVAILABLE")
                 logger.exception("流式回答失败：session_id={} code={}", session_id, code)
+                ledger.finish_run(run, "FAILED", usage=usage or None, quality={"error_code": code})
                 # 截断：我们自己抛的异常消息都很短（errorCode/tracerId），但 httpx 和模型
                 # SDK 抛的会把整个响应体拼进消息，里面可能回显 prompt——而 prompt 里有条款正文。
                 # 排障靠 trace_id 和服务端那条带 traceback 的日志，前端不需要全文。
                 yield _sse({"type": "error", "code": code, "message": str(exc)[:200], "trace_id": trace_id})
                 return
+            finally:
+                # 客户端中途关掉连接时，生成器收到的是 GeneratorExit——它是 BaseException
+                # 的子类，上面那个 except Exception 接不住，两条 finish_run 一条都跑不到，
+                # 账本里就凭空少一行。而"少一行"是账本最坏的失败形态：分不清这次请求是
+                # 没发生过还是记丢了。status 还停在 RUNNING 就说明是从非正常路径出去的。
+                if run.status == "RUNNING":
+                    ledger.finish_run(run, "ABORTED", usage=usage or None)
 
         return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"X-TRACERID": trace_id})
 
