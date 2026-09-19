@@ -82,7 +82,7 @@ def _bigrams(text: str) -> set[str]:
     return {clean[i : i + 2] for i in range(len(clean) - 1)} or {clean}
 
 
-def score(query: str, title: str, content: str) -> float:
+def relevance_score(query: str, title: str, content: str) -> float:
     """按字符 bigram 给条款打相关性分，标题命中权重高于正文。"""
     q = _bigrams(query)
     if not q:
@@ -93,7 +93,7 @@ def score(query: str, title: str, content: str) -> float:
     return round(0.6 * title_hit + 0.4 * body_hit, 4)
 
 
-def snippet(query: str, content: str, width: int = 120) -> str:
+def best_snippet(query: str, content: str, width: int = 120) -> str:
     """截取与查询最相关的一段正文，避免把整条条款塞进模型上下文。"""
     grams = _bigrams(query)
     best_pos, best_hits = 0, -1
@@ -243,11 +243,13 @@ class LocalJsonSource:
                 continue
             pool.append(c)
         scored = sorted(
-            ((score(query, c["title"], c["content"]), c) for c in pool), key=lambda p: p[0], reverse=True
+            ((relevance_score(query, c["title"], c["content"]), c) for c in pool),
+            key=lambda p: p[0],
+            reverse=True,
         )
         hits = (
             [
-                {**self._evidence(c), "score": s, "snippet": snippet(query, c["content"])}
+                {**self._evidence(c), "score": s, "snippet": best_snippet(query, c["content"])}
                 for s, c in scored[: max(limit, 1)]
                 if s >= MIN_HIT_SCORE
             ]

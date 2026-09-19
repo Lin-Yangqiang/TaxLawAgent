@@ -144,7 +144,7 @@ end note
 
 ### P1.3 — TTC 适配器 + 凭证抽象 + 离线契约测试（已完成）
 - 交付：`auth.py`（`AuthProvider` 协议 + `UserTokenProvider`）、`ttc_client.py`（`TtcSource`）
-- `sources.py` 新增 `EVIDENCE_FIELDS` + `check_source_contract()`，`snippet()` / `_bigrams()` / `score()` 提为模块级函数供两个实现共用
+- `sources.py` 新增 `EVIDENCE_FIELDS` + `check_source_contract()`，`best_snippet()` / `_bigrams()` / `relevance_score()` 提为模块级函数供两个实现共用
 - 验收已过：七个自检全绿，`TtcSource` 的传输层 `post` 可注入，契约测试不发任何网络请求；`LocalJsonSource` 与 `TtcSource` 过同一组 `check_source_contract`
 
 **保留的判断**：
@@ -158,7 +158,7 @@ end note
 
 **猜错了、已改**：
 - **状态映射**：`tlpStatus` **只有 `DRAFT`/`RELEASED`，不存在 `ARCHIVED`**。归档是独立字段 `archiveFlag`(Y/N)，失效看 `effectiveState`(`EXPIRING`/`SOONTOEXPIRATION`/空)。新规则：非 `RELEASED`→`DRAFT`；`archiveFlag=Y`→`SUPERSEDED`；`effectiveState=EXPIRING`→`REVOKED`；否则 `PUBLISHED`。`SOONTOEXPIRATION` 按现行处理（确实还有效，失效日期在 `effective_to` 里模型看得到）
-- **排序**：`taxClauseSearchESParamProcess` 显式设 `sortField=TLP_NUMBER, sortOrder=ASC`，**默认按条文编号升序，不是相关性序**；`es_score` 没映射进 `TaxClauseVO`。取前 N 条 = 取编号最小的 N 条。改成拉候选页 `min(limit*10, 100)` 后用 `sources.score()` 本地重排。**不套 `MIN_TOP_SCORE` 阈值**——ES 已判定相关，拿朴素 bigram 分当门槛会误杀字面不重合的好结果
+- **排序**：`taxClauseSearchESParamProcess` 显式设 `sortField=TLP_NUMBER, sortOrder=ASC`，**默认按条文编号升序，不是相关性序**；`es_score` 没映射进 `TaxClauseVO`。取前 N 条 = 取编号最小的 N 条。改成拉候选页 `min(limit*10, 100)` 后用 `sources.relevance_score()` 本地重排。**不套 `MIN_TOP_SCORE` 阈值**——ES 已判定相关，拿朴素 bigram 分当门槛会误杀字面不重合的好结果
 - **用户标识**：TTC 认网关透传头 `x-jalor-userAccount`，**不是 JWT claim**。`parse_token(raw, user_account)` 改成网关头优先、claim 解析只作退路
 - **失败响应**：`TaxRuleFaultVO` = `{status:0, errorCode, message, tracerId}`，HTTP 恒 200。异常消息必须带 `tracerId`（找 TTC 排障的唯一键）
 

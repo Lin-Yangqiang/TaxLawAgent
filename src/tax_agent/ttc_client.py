@@ -31,11 +31,11 @@ from tax_agent.auth import AuthProvider  # noqa: E402
 from tax_agent.sources import (  # noqa: E402
     EVIDENCE_FIELDS,
     SearchResult,
+    best_snippet,
     check_source_contract,
     content_hash,
     covers,
-    score,
-    snippet,
+    relevance_score,
 )
 
 
@@ -193,8 +193,10 @@ class TtcSource:
                 if not covered:
                     filtered_out += 1
                     continue
-            s = score(query, raw["articleOrRegulationTitle"], raw["tlpContent"])
-            scored.append((s, {**evidence, "score": s, "snippet": snippet(query, raw["tlpContent"])}))
+            s = relevance_score(query, raw["articleOrRegulationTitle"], raw["tlpContent"])
+            scored.append(
+                (s, {**evidence, "score": s, "snippet": best_snippet(query, raw["tlpContent"])})
+            )
 
         # 不套 MIN_TOP_SCORE/MIN_HIT_SCORE 阈值：ES 已经判定这些条文相关了，我们的朴素
         # bigram 分只用来排序，拿它当门槛会把 ES 认为相关、但字面不重合的好结果误杀。
@@ -371,9 +373,9 @@ class TtcPublicSource:
                 continue
             # 没有标题可打分，只能按正文算；本地重排的理由与 TtcSource 同源——
             # 公有 API 同样不返回相关性分，取前 N 条与"相关"无关
-            s = score(query, "", item["tlpContent"])
+            s = relevance_score(query, "", item["tlpContent"])
             scored.append(
-                (s, {**evidence, "score": s, "snippet": snippet(query, item["tlpContent"])})
+                (s, {**evidence, "score": s, "snippet": best_snippet(query, item["tlpContent"])})
             )
 
         scored.sort(key=lambda p: p[0], reverse=True)
