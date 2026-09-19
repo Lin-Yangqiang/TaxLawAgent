@@ -42,3 +42,7 @@ TTC 自己就是身份（tlpNumber）与属性（version）分开的。`data/cla
 
 `.venv/Scripts/python.exe`（Windows）。每个模块自带 `_demo()` 自检，
 `python src/tax_agent/<模块>.py` 直接跑，不用测试框架。
+
+行为评测在 `evals/`：`python evals/run.py`，改 `skills/` 或 `SYSTEM_PROMPT` 之后跑。
+它真调模型，慢且花钱，所以不进 `_demo()`。结果有噪声（托管端点强制 temperature=1），
+用 `--repeat 3` 看通过率，别拿单次失败下结论；断言写宽一点，措辞抖动不是纪律问题。

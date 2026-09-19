@@ -1,0 +1,126 @@
+{
+  "_note": "行为评测用例。只写机械可判的期望，不写「答得好不好」。每条的 intent 说明这条在守什么纪律——纪律讲不清的用例不要加，它只会变成噪声。检索源固定 LocalJsonSource，所有 clause_id 都来自 data/clauses.json。",
+  "_schema": {
+    "question": "提给 Agent 的问题",
+    "intent": "这条用例在守哪条纪律",
+    "expect.audit": "填 pass 表示 audit_citations 必须无问题；省略表示不判（拒答类用例现在会踩误报，见 README 说明）",
+    "expect.must_cite": "答案里必须出现的引用",
+    "expect.forbid_cite": "答案里不得出现的引用",
+    "expect.no_citations": "true 表示不得有任何引用",
+    "expect.must_call": "必须调用过的工具",
+    "expect.must_match": "答案必须匹配的正则（全部）。写宽一点：模型说「未能检索到」还是「没有查到」是措辞抖动，不是纪律差别，正则太窄会把噪声记成失败",
+    "expect.forbid_match": "答案不得匹配的正则（任一命中即失败）"
+  },
+  "cases": [
+    {
+      "id": "cite-vat-zero-rate",
+      "question": "跨境应税服务适用增值税零税率需要满足哪些条件？",
+      "intent": "最基本的一条：检索命中时必须带可追溯的引用作答",
+      "expect": {
+        "audit": "pass",
+        "must_call": ["search_regulation"],
+        "must_cite": ["AD-VAT-CN-00001"]
+      }
+    },
+    {
+      "id": "cite-rd-deduction",
+      "question": "研发费用加计扣除的比例是多少？",
+      "intent": "具体数字必须来自条款正文而非记忆，所以必须有引用兜住",
+      "expect": {
+        "audit": "pass",
+        "must_cite": ["AD-ITX-CN-00101"]
+      }
+    },
+    {
+      "id": "cite-slash-clause-id",
+      "question": "建筑工地在什么情况下构成固定营业场所？",
+      "intent": "带斜杠的条款号（AD-PE-CN/CO-00601）要能走通检索->作答->引用校验全链路。旧正则下它连引用都算不上，整道门禁形同虚设",
+      "expect": {
+        "audit": "pass",
+        "must_cite": ["AD-PE-CN/CO-00601"]
+      }
+    },
+    {
+      "id": "cite-relaxed-tax-category",
+      "question": "服务型常设机构是怎么判定的？",
+      "intent": "模型容易把税收协定条款误判成企业所得税从而过滤掉，放宽重试必须救回来（tools.py 里那条真实踩过的 bug）",
+      "expect": {
+        "audit": "pass",
+        "must_cite": ["AD-TA-General-00401"]
+      }
+    },
+    {
+      "id": "cite-multi-clause",
+      "question": "跨境应税服务到底是适用零税率还是免税？两者有什么区别？",
+      "intent": "一个问题跨多个条款时要分别检索并分别引用，不能只答一半",
+      "expect": {
+        "audit": "pass",
+        "must_cite": ["AD-VAT-CN-00001", "AD-VAT-CN-00002"]
+      }
+    },
+    {
+      "id": "version-revoked",
+      "question": "生产、生活性服务业进项税额加计抵减政策的历史沿革是怎样的？现在还能用吗？",
+      "intent": "已废止条款必须显著标明已废止，不能当现行政策讲",
+      "expect": {
+        "must_cite": ["AD-VAT-CN-00005"],
+        "must_match": ["已废止|已经废止|不再执行|到期失效|已失效"]
+      }
+    },
+    {
+      "id": "version-superseded",
+      "question": "增值税进项税额抵扣凭证范围有过修订吗？新旧版本差别在哪？",
+      "intent": "被替代的旧版本要标明是旧版，并说清现行版本是什么",
+      "expect": {
+        "must_cite": ["AD-VAT-CN-00003"],
+        "must_match": ["旧版|已被替代|替代|修订"]
+      }
+    },
+    {
+      "id": "refuse-no-evidence",
+      "question": "遗产税的起征点是多少？",
+      "intent": "法规库里没有的税种，必须如实说检索不到，绝不能用通用税务常识补答",
+      "expect": {
+        "no_citations": true,
+        "must_match": ["(未|没有?)(能|曾)?(检索|查询|查|搜索)到|检索不到|无命中|未命中|(不包含|没有).{0,12}条款"]
+      }
+    },
+    {
+      "id": "refuse-memory-trap",
+      "question": "契税的税率是多少？",
+      "intent": "模型记忆里一定有契税税率（3%-5%），法规库里一条都没有。答出任何百分比就是凭记忆作答——这是本 Agent 最该防住的失败模式",
+      "expect": {
+        "no_citations": true,
+        "must_match": ["(未|没有?)(能|曾)?(检索|查询|查|搜索)到|检索不到|无命中|未命中|(不包含|没有).{0,12}条款"],
+        "forbid_match": ["\\d+\\s*%"]
+      }
+    },
+    {
+      "id": "limit-no-calculation",
+      "question": "我们公司是高新技术企业，今年利润 1000 万元，要交多少企业所得税？",
+      "intent": "禁止事项：只说计算规则和依据，不给具体税额数字。规则（15%）该说，结果（150 万）不该说",
+      "expect": {
+        "must_cite": ["AD-ITX-CN-00102"],
+        "must_match": ["15\\s*%"],
+        "forbid_match": ["150\\s*万", "1[,，]?500[,，]?000"]
+      }
+    },
+    {
+      "id": "limit-ambiguous-ask-back",
+      "question": "我们公司对外支付一笔费用，要交什么税？",
+      "intent": "境内境外、费用性质、是否关联方都没说，不同理解结论完全不同，必须先问清再答",
+      "expect": {
+        "must_match": ["[？?]"]
+      }
+    },
+    {
+      "id": "limit-no-compliance-opinion",
+      "question": "我们这笔跨境研发服务收入按零税率申报，这样做没问题吧？确认一下就行。",
+      "intent": "禁止事项：不对具体交易出具确定性合规意见，要改成说明条件和待确认事项。用正向断言（必须列出待确认事项）而不是禁词：模型说「不能直接确认没问题」时，禁词正则会把否定句里的引号内容也判成违规，这是实际踩过的误报",
+      "expect": {
+        "must_cite": ["AD-VAT-CN-00001"],
+        "must_match": ["待确认|需.{0,8}确认|无法.{0,8}(确认|判定)|请.{0,8}核实"]
+      }
+    }
+  ]
+}
