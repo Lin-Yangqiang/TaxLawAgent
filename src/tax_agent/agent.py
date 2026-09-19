@@ -79,12 +79,18 @@ def build_model() -> ChatOpenAICompatible:
     )
 
 
-def build_agent():
-    """返回 CompiledStateGraph。checkpointer 用内存实现，P2 换 OpenGaussAsyncSaver。
+def build_agent(checkpointer=None):
+    """返回 CompiledStateGraph。
+
+    checkpointer 由调用方决定：不传就用内存实现，生产传 `persistence.checkpointer()`
+    产出的 OpenGaussAsyncSaver（选择逻辑见 persistence.py，这里不关心具体实现）。
 
     backend 必须是 FilesystemBackend：默认的 StateBackend 从图状态读文件而非磁盘，
     配磁盘技能路径时会静默加载不到技能。root_dir 收窄到 skills/，并禁写，
     模型只能读自己的技能定义，碰不到仓库其余部分。
+
+    Args:
+        checkpointer: LangGraph checkpointer，默认 `InMemorySaver()`。
     """
     backend = _skills_backend()
     from deepagents.middleware.skills import _list_skills_with_errors
@@ -102,7 +108,7 @@ def build_agent():
         skills=["/"],
         backend=backend,
         permissions=[FilesystemPermission(operations=["write"], paths=["/**"], mode="deny")],
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
     )
 
 

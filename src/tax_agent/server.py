@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from eurekax.isolation.session_manager import SessionManager  # noqa: E402
 from pyxis.app_factory import create_app as create_pyxis_app  # noqa: E402
 
 from tax_agent import config  # noqa: E402
+from tax_agent import persistence  # noqa: E402
 from tax_agent.audit import audit_citations  # noqa: E402
 from tax_agent.identity import bind, parse_token  # noqa: E402
 from tax_agent.log import TRACE_ID  # noqa: E402
@@ -84,9 +86,9 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
     不拉配置中心也不装鉴权中间件，本地和内网跑同一份代码。
 
     Args:
-        agent: 已编译的 LangGraph agent。默认现建一个（需要模型环境变量）；
-            自检时注入 stub，避免真调模型。
-        session_manager: 会话绑定管理器。默认内存实现，P2 换 OpenGaussSessionBinding。
+        agent: 已编译的 LangGraph agent。默认不建，改由 FastAPI lifespan 在
+            `app.state.agent` 上建（见下）；自检时注入 stub，避免真调模型。
+        session_manager: 会话绑定管理器。默认按 persistence.enabled() 选内存或 OpenGauss。
 
     Returns:
         可交给 uvicorn 的 FastAPI 实例。
@@ -94,18 +96,32 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
     from tax_agent.log import setup
 
     setup()  # uvicorn 用 --factory 调这个函数起服务，__main__ 只用于自检，日志配置放这里才覆盖真实入口
-    config.load_dotenv()  # 必须在 build_agent() 之前：模型三件套从环境变量读
-    if agent is None:
-        from tax_agent.agent import build_agent
-
-        agent = build_agent()
-    session_manager = session_manager or SessionManager(MemorySessionBinding())
+    config.load_dotenv()
+    session_manager = session_manager or SessionManager(persistence.build_session_binding())
 
     app = create_pyxis_app(service_name=SERVICE_NAME)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # agent 必须在这里建：OpenGaussAsyncSaver 是带连接池的异步上下文管理器，
+        # 生命周期得跟着应用走，在同步的 create_app() 里没法正确开关它。
+        async with persistence.checkpointer() as saver:
+            from tax_agent.agent import build_agent
+
+            _app.state.agent = build_agent(checkpointer=saver)
+            yield
+
+    if agent is None:
+        # 注入 stub 时（自检、web-demo --check）不装 lifespan：TestClient 不用
+        # `with` 就不会跑 lifespan，装了反而让 app.state.agent 永远是空的
+        app.router.lifespan_context = lifespan
 
     @app.post(f"{SERVICE_NAME}/chat")
     async def chat(body: ChatRequest, request: Request):
         """接一轮提问，SSE 流式吐回答，末帧带会话 ID 与引用校验结果。"""
+        # 注入的 stub 走闭包变量 agent（自检、web-demo --check）；真实 agent 建在
+        # lifespan 里挂到 app.state 上，闭包这时还是 None，只能从 request 上取。
+        runtime_agent = agent if agent is not None else request.app.state.agent
         # X-TRACERID 是 HIS 平台约定的链路头，网关有就用网关的，没有就我们生成。
         # 不装 pyxis 的 TracingMiddleware：它在 call_next 返回后立刻 reset contextvar
         # （middleware.py:26-29），而 SSE 的 body 是响应返回之后才流的，
@@ -150,7 +166,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             # 不叫 config：模块里 `from tax_agent import config` 是环境变量模块，同名会遮蔽
             run_config = {"configurable": {"thread_id": session_id}}
             try:
-                async for msg, _meta in agent.astream(
+                async for msg, _meta in runtime_agent.astream(
                     {"messages": [{"role": "user", "content": body.question}]},
                     config=run_config,
                     stream_mode="messages",
@@ -174,7 +190,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                 # 划窄了。checkpointer 按 thread_id 存了整个会话的消息历史，取来做证据集，
                 # 既不放松防编造（引用的号仍必须来自某次真实工具返回），也不再误伤合法的
                 # 多轮解读。tool_names（下面"工具调用"展示）仍然只看本轮，两者用途不同。
-                state = await agent.aget_state(run_config)
+                state = await runtime_agent.aget_state(run_config)
                 session_tool_messages = [m for m in state.values["messages"] if isinstance(m, ToolMessage)]
                 problems = audit_citations(answer, session_tool_messages)
                 elapsed_ms = round((time.perf_counter() - started) * 1000)
@@ -389,6 +405,13 @@ def _demo() -> None:
     # 7. 健康检查：两条路径都要通，不依赖任何真实 agent 调用
     assert client.get("/actuator/health").json()["status"] == "UP"
     assert client.get(f"{SERVICE_NAME}/health").json()["status"] == "UP"
+
+    # 8. 注入 stub 时不装我们自己的 lifespan：进入默认 lifespan 后 app.state 不该
+    #    冒出 agent 属性——如果冒出来了，说明默认 lifespan 被错误地换成了我们那个
+    #    会真建 agent（真调模型）的版本
+    with TestClient(app):
+        pass
+    assert not hasattr(app.state, "agent"), "注入 stub 时不该装会真建 agent 的 lifespan"
 
     print("server self-check ok")
 

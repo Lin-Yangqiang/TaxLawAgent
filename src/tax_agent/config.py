@@ -37,6 +37,12 @@ ENV_VARS: dict[str, tuple[str, str]] = {
     "TAX_AGENT_INSECURE_TLS": ("runtime", "显式关闭 TLS 校验，仅内网联调"),
     "TAX_AGENT_TRUST_ENV": ("runtime", "是否读 HTTP_PROXY 等代理环境变量"),
     "TAX_AGENT_USER_TOKEN": ("runtime", "cli.py --url 走 HTTP 模式时透传的用户 token"),
+    "TAX_AGENT_DB_HOST": ("db", "OpenGauss 主机地址，5 个 DB_* 变量要么都不配（内存模式）要么全配"),
+    "TAX_AGENT_DB_PORT": ("db", "OpenGauss 端口"),
+    "TAX_AGENT_DB_USER": ("db", "OpenGauss 用户名"),
+    "TAX_AGENT_DB_PASSWORD": ("db", "OpenGauss 密码"),
+    "TAX_AGENT_DB_NAME": ("db", "OpenGauss 数据库名"),
+    "TAX_AGENT_DB_SCHEMA": ("db", "OpenGauss schema，可选，不配就用默认 schema"),
 }
 
 _REQUIRED_MODEL = ("TAX_AGENT_BASE_URL", "TAX_AGENT_API_KEY", "TAX_AGENT_MODEL")
