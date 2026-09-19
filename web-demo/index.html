@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>税法检索与解读 Agent · 副屏 Demo</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --line: #e3e6ea; --text: #1f2328;
+    --muted: #6a737d; --accent: #2f6feb; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: grid; grid-template-columns: 1fr 420px;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  h1, h2, h3 { margin: 0; font-weight: 600; }
+  button { font: inherit; cursor: pointer; border-radius: 6px; border: 1px solid var(--line); background: #fff; padding: 5px 12px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+
+  /* ---- 主屏：法规库工作台（模拟） ---- */
+  main { display: flex; flex-direction: column; min-width: 0; }
+  .bar { padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .bar .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .tools { padding: 12px 20px; display: flex; gap: 8px; align-items: center; }
+  .tools input { flex: 1; }
+  .list { flex: 1; overflow: auto; padding: 0 20px 20px; }
+  .clause {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 10px; transition: box-shadow .2s, border-color .2s;
+  }
+  .clause.hit { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,111,235,.15); }
+  .clause .id { font-family: ui-monospace, Consolas, monospace; color: var(--accent); font-weight: 600; }
+  .clause .title { margin: 4px 0; }
+  .clause .meta { color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .clause .body { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); color: #33383d; }
+  .clause.open .body { display: block; }
+  .pill { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid; }
+  .s-PUBLISHED { color: var(--ok); border-color: var(--ok); }
+  .s-SUPERSEDED { color: var(--warn); border-color: var(--warn); }
+  .s-REVOKED { color: var(--bad); border-color: var(--bad); }
+  .s-DRAFT { color: var(--muted); border-color: var(--muted); }
+
+  /* ---- 副屏抽屉 ---- */
+  aside { display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-width: 0; }
+  .head { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .head .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .head input { flex: 1; font-size: 13px; }
+  .chat { flex: 1; overflow: auto; padding: 16px; }
+  .msg { margin-bottom: 16px; }
+  .msg.u { text-align: right; }
+  .msg.u span { display: inline-block; background: var(--accent); color: #fff; padding: 7px 12px; border-radius: 12px 12px 2px 12px; text-align: left; }
+  .msg.a .text { white-space: pre-wrap; }
+  .cite {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--accent);
+    background: rgba(47,111,235,.1); padding: 0 4px; border-radius: 3px; cursor: pointer;
+  }
+  .ev { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 12px; background: #fafbfc; }
+  .ev .k { color: var(--muted); }
+  .ev .pass { color: var(--ok); font-weight: 600; }
+  .ev .fail { color: var(--bad); font-weight: 600; }
+  .ev ul { margin: 4px 0 0; padding-left: 18px; }
+  .foot { border-top: 1px solid var(--line); padding: 12px 16px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .chips button { font-size: 12px; padding: 3px 9px; color: var(--muted); }
+  .send { display: flex; gap: 8px; }
+  .send input { flex: 1; }
+  .tip { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<main>
+  <div class="bar">
+    <h1>TTC 法规库</h1>
+    <div class="sub">模拟工作台 · 数据来自本地样本库 data/clauses.json，与右侧 Agent 检索的是同一个库</div>
+  </div>
+  <div class="tools">
+    <input id="q" placeholder="按条款号、标题或税种过滤，如 AD-VAT 或 增值税">
+    <span class="tip" id="count"></span>
+  </div>
+  <div class="list" id="list"></div>
+</main>
+
+<aside>
+  <div class="head">
+    <h2>税法检索与解读 Agent</h2>
+    <div class="row">
+      <input id="who" placeholder="身份（x-jalor-userAccount），留空=匿名">
+      <button id="reset">新会话</button>
+    </div>
+  </div>
+  <div class="chat" id="chat">
+    <div class="tip">问一个税务问题。答案里的条款号可以点，会定位到左侧原文。</div>
+  </div>
+  <div class="foot">
+    <div class="chips" id="chips"></div>
+    <div class="send">
+      <input id="ask" placeholder="输入问题，回车发送">
+      <button class="primary" id="send">发送</button>
+    </div>
+  </div>
+</aside>
+
+<script>
+const $ = id => document.getElementById(id);
+// 挑自 evals/cases.json：每条都在守一条纪律，比随手编的问题更能看出 Agent 有没有走样
+const CHIPS = [
+  ['零税率条件', '跨境应税服务适用增值税零税率需要满足哪些条件？'],
+  ['废止政策', '我们公司是生活性服务业，进项税额加计抵减政策现在还能享受吗？'],
+  ['过去时点', '我们 2024 年 5 月 10 日取得一张国内旅客运输服务的电子普通发票，当时这笔进项税能不能抵扣？'],
+  ['库里没有', '契税的税率是多少？'],
+  ['不准算税额', '我们公司是高新技术企业，今年利润 1000 万元，要交多少企业所得税？'],
+];
+let clauses = [], sessionId = null, busy = false;
+
+// ---- 主屏 ----
+fetch('/demo-data/clauses.json').then(r => r.json()).then(d => { clauses = d.clauses; render(); });
+
+function render() {
+  const kw = $('q').value.trim().toLowerCase();
+  const hit = clauses.filter(c => !kw ||
+    (c.source_id + c.title + c.tax_category + c.tlp_number).toLowerCase().includes(kw));
+  $('count').textContent = `${hit.length} / ${clauses.length} 条`;
+  $('list').innerHTML = hit.map(c => `
+    <div class="clause" id="c-${cssId(c.source_id)}-${c.revision}" onclick="this.classList.toggle('open')">
+      <div class="id">${esc(c.source_id)}${c.revision > 1 ? ` · rev ${c.revision}` : ''}</div>
+      <div class="title">${esc(c.title)}</div>
+      <div class="meta">
+        <span class="pill s-${c.clause_status}">${c.clause_status}</span>
+        <span>${esc(c.tax_category)}</span>
+        <span>${c.effective_from || '生效日未维护'} ~ ${c.effective_to || '至今'}</span>
+        <span>${esc(c.tlp_number)}</span>
+      </div>
+      <div class="body">${esc(c.content)}</div>
+    </div>`).join('') || '<div class="tip">没有匹配的条款。</div>';
+}
+$('q').oninput = render;
+
+// clause_id 带斜杠（AD-PE-CN/CO-00601），不能直接当 CSS 选择器用
+const cssId = s => s.replace(/[^A-Za-z0-9-]/g, '_');
+const esc = s => String(s).replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+
+function locate(id) {
+  // 同一 clause_id 可能有多版，定位到 revision 最大的那条
+  const el = [...document.querySelectorAll(`[id^="c-${cssId(id)}-"]`)].pop();
+  if (!el) return;
+  $('q').value = ''; render();
+  const again = [...document.querySelectorAll(`[id^="c-${cssId(id)}-"]`)].pop();
+  again.classList.add('open', 'hit');
+  again.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setTimeout(() => again.classList.remove('hit'), 2500);
+}
+
+// ---- 副屏 ----
+$('chips').innerHTML = CHIPS.map(([label], i) => `<button onclick="pick(${i})">${label}</button>`).join('');
+const pick = i => { $('ask').value = CHIPS[i][1]; ask(); };
+$('send').onclick = ask;
+$('ask').onkeydown = e => { if (e.key === 'Enter') ask(); };
+$('reset').onclick = () => {
+  sessionId = null;
+  $('chat').innerHTML = '<div class="tip">已开新会话。改身份后重开会话，可以看到会话归属校验（越权返回 403）。</div>';
+};
+
+function bubble(cls, html) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.innerHTML = html;
+  $('chat').appendChild(d);
+  $('chat').scrollTop = 1e9;
+  return d;
+}
+
+// 条款号形态见 CLAUDE.md：段内可能混大小写，也可能带斜杠（AD-PE-CN/CO-00601）
+const CITE = /\[(AD-[A-Za-z0-9/-]+-\d+)\]/g;
+const linkCites = t => esc(t).replace(CITE, (_, id) =>
+  `<span class="cite" onclick="locate('${id}')">[${id}]</span>`);
+
+async function ask() {
+  const question = $('ask').value.trim();
+  if (!question || busy) return;
+  busy = true; $('send').disabled = true; $('ask').value = '';
+
+  bubble('u', `<span>${esc(question)}</span>`);
+  const box = bubble('a', '<div class="text"></div>');
+  const text = box.querySelector('.text');
+  let answer = '', tools = [];
+
+  const headers = { 'Content-Type': 'application/json' };
+  const who = $('who').value.trim();
+  // 服务无条件信任这个网关头，所以本地才敢这么填；生产必须由网关注入
+  if (who) { headers['x-jalor-userAccount'] = who; headers['x-jwt-ms-token'] = 'demo'; }
+
+  try {
+    const res = await fetch('/tax-agent/chat', {
+      method: 'POST', headers,
+      body: JSON.stringify({ question, session_id: sessionId }),
+    });
+    if (!res.ok) {
+      text.innerHTML = `<span class="ev fail">HTTP ${res.status}：${esc(await res.text())}</span>`;
+      return;
+    }
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      // SSE 帧以空行分隔；最后一段可能不完整，留在缓冲里等下一块
+      const frames = buf.split('\n\n'); buf = frames.pop();
+      for (const f of frames) {
+        if (!f.startsWith('data: ')) continue;
+        const e = JSON.parse(f.slice(6));
+        if (e.type === 'token') {
+          answer += e.text;
+          text.innerHTML = linkCites(answer);
+        } else if (e.type === 'tool') {
+          tools.push(e.name);
+          // 工具返回意味着上一段是中间独白不是终答，服务端会清空重攒，这里跟着清
+          answer = '';
+          text.innerHTML = `<span class="tip">调用 ${esc(e.name)} …</span>`;
+        } else if (e.type === 'done') {
+          sessionId = e.session_id;
+          box.appendChild(evidence(e, tools));
+        }
+        $('chat').scrollTop = 1e9;
+      }
+    }
+  } catch (err) {
+    text.innerHTML = `<span class="ev fail">请求失败：${esc(err.message)}</span>`;
+  } finally {
+    busy = false; $('send').disabled = false;
+  }
+}
+
+function evidence(done, tools) {
+  const bad = done.citation_problems.length;
+  const d = document.createElement('div');
+  d.className = 'ev';
+  d.innerHTML = `
+    <div><span class="k">工具调用：</span>${tools.length ? tools.map(esc).join(' → ') : '无'}</div>
+    <div><span class="k">引用校验：</span>${bad
+      ? `<span class="fail">不通过</span><ul>${done.citation_problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`
+      : '<span class="pass">通过</span>'}</div>
+    <div><span class="k">身份：</span>${esc(done.auth_mode)} · <span class="k">会话：</span>${esc(done.session_id)}</div>`;
+  return d;
+}
+</script>
+</body>
+</html>

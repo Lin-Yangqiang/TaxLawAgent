@@ -177,6 +177,17 @@ end note
 - 抓一份**过期 token 的真实响应**，把 `errorCode` 固定下来作为"请重新登录"的判定键——无法单靠 HTTP 状态码区分"过期"和"没权限"
 - 验收：用户 token 路径下能返回带引用的答案，且结果集与该用户在页面上所见一致
 
+### P1.5 — 本地演示页面（已完成）
+- `web-demo/serve.py`（组合根）+ `web-demo/index.html`（单文件页面），**`server.py` 一行不改**：
+  demo 只是 import `create_app()` 再挂静态目录，依赖单向（web-demo → tax_agent），
+  生产部署产物里没有这个页面（`pyproject` 的 `packages.find` 只收 `src/`）
+- 形态：左边模拟 TTC 法规库工作台（直接读 `data/clauses.json`），右边副屏抽屉；
+  答案里的条款号可点，定位并高亮左侧原文；每轮末尾展示证据面板（工具调用链 / 引用校验 / auth_mode / session_id）
+- 页面能自己填 `x-jalor-userAccount`——服务本来就无条件信任这个网关头，demo 加不加都一样。
+  真正的约束是**服务绝不能脱离网关暴露**，所以只绑 127.0.0.1
+- 验收：自检通过；真实模型一轮 SSE 流式正常、`citation_problems=[]`；
+  用 lisi 的身份带 zhangsan 的 `session_id` → 403
+
 ### P2（不在本计划范围）
 持久化 checkpointer（OpenGauss）、法规变更感知、MQ、专家审核、前端嵌入 TTC 页面。
 
