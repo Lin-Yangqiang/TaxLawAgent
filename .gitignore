@@ -1,5 +1,8 @@
 .venv/
 .env
+# 内网 SDK 源码与 TTC 内部文档：只在本机参考，不进版本控制。
+# 曾经被跟踪过，仓库合成单分支时连历史一并丢弃（存档在本地 tag archive/master-with-assets）
+assets/
 __pycache__/
 *.pyc
 .idea/
