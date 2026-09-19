@@ -42,14 +42,18 @@ def audit_citations(answer: str, messages: list) -> list[str]:
 
     from tax_agent.tools import known_clause_ids
 
-    cited = set(CITATION.findall(answer))
-    if not cited:
-        return ["回答中没有任何条款引用"] if len(answer) > 80 else []
-
     retrieved: set[str] = set()
     for msg in messages:
         if isinstance(msg, ToolMessage):
             retrieved.update(re.findall(CLAUSE_ID, str(msg.content)))
+
+    cited = set(CITATION.findall(answer))
+    if not cited:
+        # 只有"确实检索到过条款、但终答一个都没引用"才可疑——要么凭记忆答了内容却忘记
+        # 标注，要么该拒答却东拉西扯。压根没检索到任何条款时，长篇拒答（"检索不到，
+        # 建议核实……"）完全合理，不该被这条误伤：refuse-no-evidence / refuse-memory-trap
+        # 这类用例的正确答案本来就该长而无引用
+        return ["回答中没有任何条款引用，但本会话检索到过条款"] if retrieved and len(answer) > 80 else []
 
     problems = []
     known = known_clause_ids()
@@ -75,7 +79,10 @@ def _demo() -> None:
     assert "不存在" in audit_citations("依据[AD-VAT-CN-99999]", retrieved)[0]
     # 真实存在但本轮没检索过——凭记忆作答
     assert "未经检索" in audit_citations("依据[AD-ITX-CN-00101]", retrieved)[0]
-    assert audit_citations("本轮没有法规事实，" * 10, retrieved) == ["回答中没有任何条款引用"]
+    assert audit_citations("本轮没有法规事实，" * 10, retrieved) == ["回答中没有任何条款引用，但本会话检索到过条款"]
+
+    # 压根没检索到任何条款时，长篇拒答完全合理——不该被"超过 80 字却无引用"这条误伤
+    assert audit_citations("检索不到相关政策，建议核实税种名称是否正确。" * 5, []) == []
 
     # 段内混大小写（TTC 的 General 税地）必须能识别，这是旧正则漏掉的形态
     mixed = [ToolMessage(content="AD-TA-General-00401", tool_call_id="1")]

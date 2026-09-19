@@ -270,7 +270,7 @@ def _demo() -> None:
     streamed = "".join(e["text"] for e in events if e["type"] == "token")
     assert StubAgent.NARRATION in streamed, streamed  # 独白该看见就看见，不是吞掉
     # 独白里那条 [AD-VAT-CN-00001] 不能替终答背书：answer 只该有终答，于是必须报"没有引用"
-    assert done["citation_problems"] == ["回答中没有任何条款引用"], done
+    assert done["citation_problems"] == ["回答中没有任何条款引用，但本会话检索到过条款"], done
 
     # token 不进图：检查上面 zhangsan 那次调用留下的 config
     zhangsan_config = stub.captured_configs[-1]
