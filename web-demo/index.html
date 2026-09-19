@@ -91,6 +91,9 @@
       <input id="who" placeholder="身份（x-jalor-userAccount），留空=匿名">
       <button id="reset">新会话</button>
     </div>
+    <div class="row">
+      <input id="token" placeholder="真实 IAM token（x-jwt-ms-token），接 TTC 时必填，本地样本库留空即可">
+    </div>
   </div>
   <div class="chat" id="chat">
     <div class="tip">问一个税务问题。答案里的条款号可以点，会定位到左侧原文。</div>
@@ -190,8 +193,14 @@ async function ask() {
 
   const headers = { 'Content-Type': 'application/json' };
   const who = $('who').value.trim();
-  // 服务无条件信任这个网关头，所以本地才敢这么填；生产必须由网关注入
-  if (who) { headers['x-jalor-userAccount'] = who; headers['x-jwt-ms-token'] = 'demo'; }
+  const token = $('token').value.trim();
+  // 服务无条件信任这个网关头，所以本地才敢这么填；生产必须由网关注入。
+  // x-jwt-ms-token 只有在接 TTC（TAX_AGENT_SOURCE=ttc_user）时才会被转发校验签名，
+  // 必须填真实 IAM token；只填身份不填 token 时兜底成 'demo'——服务端 parse_token
+  // 只要网关头非空就直接信它、不解码这个值，本地样本库场景够用，纯粹是为了让
+  // "填了身份=有 token" 这条判断成立，不会被当成匿名
+  if (who) { headers['x-jalor-userAccount'] = who; headers['x-jwt-ms-token'] = token || 'demo'; }
+  else if (token) { headers['x-jwt-ms-token'] = token; }
 
   try {
     const res = await fetch('/tax-agent/chat', {
