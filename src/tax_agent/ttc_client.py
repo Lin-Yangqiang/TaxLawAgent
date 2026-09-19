@@ -26,6 +26,7 @@ from loguru import logger
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tax_agent import nettls  # noqa: E402
 from tax_agent.auth import AuthProvider  # noqa: E402
 from tax_agent.sources import (  # noqa: E402
     EVIDENCE_FIELDS,
@@ -115,7 +116,10 @@ def _unwrap(payload: dict[str, Any], *, expect_key: str) -> Any:
 
 
 def _default_post(url: str, body: dict[str, Any], headers: dict[str, str], timeout: float) -> dict[str, Any]:
-    return httpx.post(url, json=body, headers=headers, timeout=timeout).json()
+    # TLS/代理配置集中在 nettls：内网自签证书要么喂根 CA，要么显式降级，默认不放过
+    return httpx.post(
+        url, json=body, headers=headers, timeout=timeout, **nettls.client_kwargs()
+    ).json()
 
 
 class TtcSource:

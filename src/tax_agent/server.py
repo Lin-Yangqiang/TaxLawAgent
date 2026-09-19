@@ -9,6 +9,7 @@ thread_id，原因见 identity.py 顶部注释。
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -39,6 +40,31 @@ from tax_agent.identity import bind, parse_token  # noqa: E402
 # 微服务名。pyxis 用它拼 openapi/docs 路由，内网网关也按这个前缀路由，
 # 所以业务接口一并挂在同一前缀下，本地和内网的 URL 完全一致。
 SERVICE_NAME = "/tax-agent"
+
+
+def _load_dotenv_for_dev() -> None:
+    """联调时把 `.env` 读进环境变量。生产环境**不读**。
+
+    为什么需要：uvicorn 用 `--factory` 起服务时不经过 `cli.py`，没人加载 `.env`，
+    模型三件套会全缺，表现为启动即报"缺少模型配置环境变量"。
+
+    为什么要挡生产：`.env` 是开发者本机的配置（联调用的模型端点、应用级凭证），
+    在生产悄悄生效会让服务连到错误的后端，而且优先级问题极难排查。
+    生产由部署平台注入真实环境变量，设 `TAX_AGENT_ENV=prod` 关掉这里。
+
+    用 `setdefault`：已经导出到 shell 的变量优先，`.env` 只补没有的。
+    """
+    if os.getenv("TAX_AGENT_ENV") == "prod":
+        return
+    env_file = Path(__file__).resolve().parents[2] / ".env"
+    if not env_file.is_file():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    logger.info("已加载 .env（联调用；生产设 TAX_AGENT_ENV=prod 关闭）")
 
 
 class ChatRequest(BaseModel):
@@ -75,6 +101,7 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
     from tax_agent.log import setup
 
     setup()  # uvicorn 用 --factory 调这个函数起服务，__main__ 只用于自检，日志配置放这里才覆盖真实入口
+    _load_dotenv_for_dev()  # 必须在 build_agent() 之前：模型三件套从环境变量读
     if agent is None:
         from tax_agent.agent import build_agent
 

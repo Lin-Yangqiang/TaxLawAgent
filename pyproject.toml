@@ -5,13 +5,19 @@ description = "税法检索与解读 Agent"
 requires-python = ">=3.12"
 
 # 只列直接依赖。langchain-core / langgraph-checkpoint 等由它们传递带入，不重复钉版本。
+#
+# 前五个用 `==` 而不是 `>=`：内网 hw-finance-agentframework==1.0.3.dev5 硬约束了这些版本，
+# 且全部**低于**原先声明的下限（原为 deepagents>=0.7.15 等），两边声明互相无法满足。
+# 用 `>=` 就变成"外网测 0.7.15、内网跑 0.6.2"——deepagents 这两版的
+# FilesystemBackend(virtual_mode=) 默认值不同，已经在内网踩过一次（技能列表返回空）。
+# 钉成内网实际版本，外网测的才是内网跑的。内网包升级时这五行一起改。
 dependencies = [
-    "deepagents>=0.7.15",   # create_deep_agent / skills / FilesystemBackend / permissions
-    "langchain-openai>=1.6.2",  # eurekax.ChatOpenAICompatible 继承 ChatOpenAI
-    "langgraph>=1.2.11",    # InMemorySaver（P2 换 OpenGaussAsyncSaver）
-    "fastapi>=0.141.1",     # POST /chat + SSE
-    "uvicorn>=0.53.0",      # ASGI server
-    "sqlalchemy>=2.0.54",   # eurekax.isolation.__init__ 无条件导入 OpenGaussSessionBinding，间接依赖
+    "deepagents==0.6.2",        # create_deep_agent / skills / FilesystemBackend / permissions
+    "langchain-openai==1.3.0",  # eurekax.ChatOpenAICompatible 继承 ChatOpenAI
+    "fastapi==0.136.1",         # POST /chat + SSE
+    "uvicorn==0.46.0",          # ASGI server
+    "sqlalchemy==2.0.50",       # eurekax.isolation.__init__ 无条件导入 OpenGaussSessionBinding，间接依赖
+    "langgraph>=1.2.11",    # InMemorySaver（P2 换 OpenGaussAsyncSaver）；内网包未约束，跟随 deepagents 的传递依赖
     "loguru>=0.7.3",        # 检索/过滤/引用校验三类失败要能在日志里一眼区分，stdlib logging 配置太啰嗦
     "httpx>=0.28",          # TTC HTTP 调用
 ]

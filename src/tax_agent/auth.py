@@ -26,6 +26,7 @@ from loguru import logger
 if __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tax_agent import nettls  # noqa: E402
 from tax_agent.identity import current  # noqa: E402
 
 
@@ -66,15 +67,13 @@ def _post_token(url: str, body: dict[str, Any]) -> dict[str, Any]:
     Raises:
         RuntimeError: HTTP 状态码非 200。
     """
-    # ponytail: verify=False 是内网自签证书的已知妥协，trust_env=False 是因为 HIS
-    # 系统代理会 407 拦截内网请求。正式部署换成可信证书后应把 verify 打开。
+    # TLS/代理配置集中在 nettls：内网自签证书优先喂根 CA，拿不到根 CA 才显式降级
     response = httpx.post(
         url,
         json=body,
         headers={"Content-Type": "application/json"},
         timeout=15.0,
-        verify=False,
-        trust_env=False,
+        **nettls.client_kwargs(),
     )
     if response.status_code != 200:
         raise RuntimeError(f"APIC 换 token 失败：HTTP {response.status_code}")
