@@ -1,4 +1,4 @@
-"""引用校验：答案里的每个 clause_id 都必须真实存在，且本轮确实被工具返回过。
+"""引用校验：答案里的每个 clause_id 都必须真实存在，且在本会话中确实被工具返回过。
 
 这是本 Agent 的核心质量门禁——模型编造一个看起来合理的条款号是最危险的失败模式，
 而它恰好是最难被人眼发现的。
@@ -31,7 +31,9 @@ def audit_citations(answer: str, messages: list) -> list[str]:
 
     Args:
         answer: 模型最终给用户的回答全文。
-        messages: 本轮对话的消息列表，其中的 ToolMessage 是"本轮检索过什么"的唯一依据。
+        messages: 本会话的消息列表（含历史轮次），其中的 ToolMessage 是"检索过什么"的唯一依据。
+            调用方决定这个列表的范围——传本轮就只认本轮，传整个 session 历史就认全会话，
+            这里不关心口径，只认"出现在列表里 = 真实检索过"。
 
     Returns:
         问题描述列表，全部通过时为空列表。
@@ -60,7 +62,7 @@ def audit_citations(answer: str, messages: list) -> list[str]:
         problems.append(f"引用了法规库中不存在的条款：{', '.join(fabricated)}")
     in_scope = cited if known is None else cited & known
     if unretrieved := sorted(in_scope - retrieved):
-        problems.append(f"引用了本轮未经检索的条款：{', '.join(unretrieved)}")
+        problems.append(f"引用了未经检索的条款：{', '.join(unretrieved)}")
     return problems
 
 

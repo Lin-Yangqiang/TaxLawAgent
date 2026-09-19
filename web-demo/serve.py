@@ -54,6 +54,11 @@ def _demo() -> None:
             return
             yield  # pragma: no cover - 让它成为 async generator
 
+        async def aget_state(self, config):
+            import types
+
+            return types.SimpleNamespace(values={"messages": []})
+
     client = TestClient(build_demo_app(agent=StubAgent()))
 
     assert client.get("/").status_code == 200

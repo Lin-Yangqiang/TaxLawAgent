@@ -146,10 +146,11 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
             started = time.perf_counter()
             tool_messages: list[ToolMessage] = []
             answer_parts: list[str] = []
+            # 只放 thread_id：token 一旦进 config，二期换持久化 checkpointer 后会落盘
+            config = {"configurable": {"thread_id": session_id}}
             async for msg, _meta in agent.astream(
                 {"messages": [{"role": "user", "content": body.question}]},
-                # 只放 thread_id：token 一旦进 config，二期换持久化 checkpointer 后会落盘
-                config={"configurable": {"thread_id": session_id}},
+                config=config,
                 stream_mode="messages",
             ):
                 if isinstance(msg, ToolMessage):
@@ -166,7 +167,14 @@ def create_app(agent=None, session_manager=None) -> FastAPI:
                     yield _sse({"type": "token", "text": msg.content})
 
             answer = "".join(answer_parts)
-            problems = audit_citations(answer, tool_messages)
+            # 引用校验的证据集不能只看这次 HTTP 请求：同一 session 里追问时，模型常常
+            # 引用上一轮已经真实检索过的条款做延伸解读，这不是编造，只是"本轮"这个口径
+            # 划窄了。checkpointer 按 thread_id 存了整个会话的消息历史，取来做证据集，
+            # 既不放松防编造（引用的号仍必须来自某次真实工具返回），也不再误伤合法的
+            # 多轮解读。tool_names（下面"工具调用"展示）仍然只看本轮，两者用途不同。
+            state = await agent.aget_state(config)
+            session_tool_messages = [m for m in state.values["messages"] if isinstance(m, ToolMessage)]
+            problems = audit_citations(answer, session_tool_messages)
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             tool_names = [m.name for m in tool_messages]
             logger.info(
@@ -201,6 +209,7 @@ def _parse_sse(text: str) -> list[dict]:
 def _demo() -> None:
     """自检绝不调用真实模型：注入一个记录 config/identity 的 stub agent。"""
     import base64
+    import types
 
     from fastapi.testclient import TestClient
     from langchain_core.messages import AIMessageChunk
@@ -224,6 +233,13 @@ def _demo() -> None:
             yield AIMessageChunk(content=self.NARRATION), {}
             yield ToolMessage(content="AD-VAT-CN-00001", tool_call_id="1", name="search_regulation"), {}
             yield AIMessageChunk(content=self.FINAL), {}
+
+        async def aget_state(self, config):
+            # 真实 aget_state 返回整个会话的历史消息；这里固定一条即可，
+            # 下面的用例都不依赖"检索过哪条"，只依赖"确实有过检索"
+            return types.SimpleNamespace(
+                values={"messages": [ToolMessage(content="AD-VAT-CN-00001", tool_call_id="1", name="search_regulation")]}
+            )
 
     def make_token(payload: dict) -> str:
         segment = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
@@ -278,6 +294,39 @@ def _demo() -> None:
     )
     assert r.status_code == 200, r.text
     assert stub.captured_identities[-1].isolate_key == "wangwu"
+
+    # 5. 跨轮引用：上一轮真检索过的条款，本轮凭会话上下文引用（没再调工具）
+    #    不该被判"未经检索"——这是合法的延伸解读，不是编造
+    class MultiTurnStubAgent:
+        """按 thread_id 攒历史消息，模拟 checkpointer 的跨轮持久化。"""
+
+        def __init__(self) -> None:
+            self.history: dict[str, list] = {}
+
+        async def astream(self, _input, config=None, stream_mode=None):
+            turn = self.history.setdefault(config["configurable"]["thread_id"], [])
+            if not turn:
+                tm = ToolMessage(content="AD-VAT-CN-00001", tool_call_id="1", name="search_regulation")
+                final = AIMessageChunk(content="零税率需备案[AD-VAT-CN-00001]")
+            else:
+                tm = None
+                final = AIMessageChunk(content="境外消费同样满足[AD-VAT-CN-00001]")
+            if tm is not None:
+                turn.append(tm)
+                yield tm, {}
+            turn.append(final)
+            yield final, {}
+
+        async def aget_state(self, config):
+            return types.SimpleNamespace(values={"messages": self.history.get(config["configurable"]["thread_id"], [])})
+
+    multi = MultiTurnStubAgent()
+    client2 = TestClient(create_app(agent=multi, session_manager=SessionManager(MemorySessionBinding())))
+    r = client2.post(f"{SERVICE_NAME}/chat", json={"question": "零税率条件？"})
+    sid = _parse_sse(r.text)[-1]["session_id"]
+    r = client2.post(f"{SERVICE_NAME}/chat", json={"question": "境外消费也算吗？", "session_id": sid})
+    done = _parse_sse(r.text)[-1]
+    assert done["citation_problems"] == [], done
 
     print("server self-check ok")
 
